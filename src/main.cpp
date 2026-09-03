@@ -32,6 +32,10 @@
 
 namespace {
 
+#ifndef ASCIIPLAY_VERSION            // building without CMake
+#define ASCIIPLAY_VERSION "unknown"
+#endif
+
 void usage() {
     std::puts(
 "asciiplay -- shape-matched ASCII art from images and video\n"
@@ -68,6 +72,10 @@ void usage() {
 "  -o, --out FILE     write to a file instead of playing (video: first frame)\n"
 "      --image        treat the input as a still\n"
 "      --video        treat the input as video\n"
+"\n"
+"Other\n"
+"  -h, --help         this message\n"
+"  -V, --version      print the version and exit\n"
 "\n"
 "Keys during playback:  q / Esc quit    space pause\n"
 "\n"
@@ -116,6 +124,10 @@ Options parseArgs(int argc, char** argv) {
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         if      (a == "-h" || a == "--help")    { usage(); std::exit(0); }
+        else if (a == "-V" || a == "--version") {
+            std::printf("asciiplay %s\n", ASCIIPLAY_VERSION);
+            std::exit(0);
+        }
         else if (a == "-c" || a == "--cols")    opt.cols = std::atoi(need(i, "--cols").c_str());
         else if (a == "-r" || a == "--rows")    opt.rows = std::atoi(need(i, "--rows").c_str());
         else if (a == "--cell") {

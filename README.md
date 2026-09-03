@@ -84,6 +84,15 @@ follows from that choice:
 Decoding is delegated to `ffmpeg` over a pipe, which also does the scaling. That
 means anything ffmpeg can read works, and there is nothing to link against.
 
+## Install
+
+```sh
+brew install Fallen-Zen/asciiplay/asciiplay
+```
+
+Works on macOS and Linux, and pulls in ffmpeg for you. Otherwise build from
+source — see [Build](#build) below.
+
 ## Requirements
 
 - A C++17 compiler and CMake ≥ 3.16
@@ -116,8 +125,10 @@ cmake -S . -B build -G "Visual Studio 17 2022"     # Windows
 cmake -S . -B build -G Xcode                       # macOS
 ```
 
-`-DASCIIPLAY_NATIVE=OFF` disables `-march=native` / `-mcpu=native`, which you
-want if the binary has to run on a different machine than the one that built it.
+`-DASCIIPLAY_NATIVE=ON` adds `-march=native` / `-mcpu=native`. It is off by
+default because a binary built with it runs only on CPUs at least as new as the
+one that built it — fine for your own machine, wrong for anything you hand to
+someone else. Turn it on for a local build if you want the last few percent.
 
 ## Usage
 
@@ -151,6 +162,7 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 | `-j, --threads N` | matcher threads (default: all cores) |
 | `-o, --out FILE` | write to a file instead of playing |
 | `--image` / `--video` | override input type detection |
+| `-V, --version` | print the version and exit |
 
 During playback: `q` or `Esc` quits, `space` pauses. Resizing the terminal
 re-fits the picture and resumes from the same position.

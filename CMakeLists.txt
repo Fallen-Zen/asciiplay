@@ -9,7 +9,7 @@
 #  for the full text.
 #
 cmake_minimum_required(VERSION 3.16)
-project(asciiplay VERSION 1.0.0 LANGUAGES CXX)
+project(asciiplay VERSION 1.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +31,8 @@ add_executable(asciiplay
 )
 
 target_include_directories(asciiplay PRIVATE src)
+target_compile_definitions(asciiplay PRIVATE
+                           ASCIIPLAY_VERSION="${PROJECT_VERSION}")
 
 # ---- threads ---------------------------------------------------------------
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -49,9 +51,12 @@ else()
     target_compile_options(asciiplay PRIVATE -Wall -Wextra -Wno-unused-parameter)
     target_compile_options(asciiplay PRIVATE $<$<CONFIG:Release>:-O3 -ffast-math>)
 
-    # Native tuning: the flag differs between x86 and Apple Silicon, and is
-    # unsafe when the binary is meant to be redistributable.
-    option(ASCIIPLAY_NATIVE "Tune for the building machine's CPU" ON)
+    # Native tuning: the flag differs between x86 and Apple Silicon.  Off by
+    # default, because a binary built with it runs only on CPUs at least as new
+    # as the one that built it -- which is fine for your own machine and wrong
+    # for anything anyone else installs (Homebrew bottles, distro packages, a
+    # binary copied to another box).  Turn it on for a local build.
+    option(ASCIIPLAY_NATIVE "Tune for the building machine's CPU" OFF)
     if(ASCIIPLAY_NATIVE)
         check_cxx_compiler_flag("-march=native" HAVE_MARCH_NATIVE)
         if(HAVE_MARCH_NATIVE)
