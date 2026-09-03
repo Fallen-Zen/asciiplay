@@ -106,6 +106,16 @@ Proc& Proc::operator=(Proc&& o) noexcept {
 
 bool Proc::valid() const { return proc_ != nullptr; }
 
+bool haveExecutable(const std::string& name) {
+    // SearchPath applies the usual rules, including PATHEXT via the extension
+    // hint, so "ffmpeg" finds ffmpeg.exe.
+    char found[MAX_PATH];
+    char* filePart = nullptr;
+    DWORD n = ::SearchPathA(nullptr, name.c_str(), ".exe",
+                            (DWORD)sizeof found, found, &filePart);
+    return n > 0 && n < sizeof found;
+}
+
 Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
     Proc r;
     if (argv.empty()) return r;

@@ -33,6 +33,11 @@ public:
     Proc& operator=(Proc&& o) noexcept;
 
     // argv[0] is looked up on PATH.  Returns an invalid Proc on failure.
+    //
+    // On POSIX "failure" only covers fork: a missing executable fails in the
+    // child, after the fork has already succeeded, so the parent gets a valid
+    // Proc whose pipe reads EOF.  Use haveExecutable() to tell "not installed"
+    // apart from "ran but produced nothing".
     static Proc spawn(const std::vector<std::string>& argv, bool pipeStdout);
 
     bool        valid() const;
@@ -44,6 +49,11 @@ private:
     void* proc_ = nullptr;   // HANDLE on Windows, encoded pid on POSIX
     void* pipe_ = nullptr;   // HANDLE on Windows, encoded fd on POSIX
 };
+
+// Is this command runnable -- an executable of that name on PATH (or a path
+// that is itself executable)?  Lets us say "ffmpeg is not installed" instead of
+// blaming the input file.
+bool haveExecutable(const std::string& name);
 
 // When true, children keep our stderr instead of /dev/null, so ffmpeg and
 // ffplay can report why they failed.  Off by default: their output would

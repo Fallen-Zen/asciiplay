@@ -65,6 +65,26 @@ Proc& Proc::operator=(Proc&& o) noexcept {
 
 bool Proc::valid() const { return dec(proc_) > 0; }
 
+bool haveExecutable(const std::string& name) {
+    auto runnable = [](const std::string& p) {
+        struct stat st;
+        return ::access(p.c_str(), X_OK) == 0 &&
+               ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+    };
+    if (name.find('/') != std::string::npos) return runnable(name);
+
+    const char* path = ::getenv("PATH");
+    if (!path || !*path) path = "/usr/bin:/bin:/usr/local/bin";
+    std::string dir;
+    for (const char* c = path; ; ++c) {
+        if (*c && *c != ':') { dir += *c; continue; }
+        if (!dir.empty() && runnable(dir + "/" + name)) return true;
+        dir.clear();
+        if (!*c) break;
+    }
+    return false;
+}
+
 Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
     Proc r;
     int p[2] = {-1, -1};

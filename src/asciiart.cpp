@@ -38,6 +38,16 @@ std::vector<std::string> splitAny(const std::string& s, const char* seps) {
 // ------------------------------------------------------------ media probe --
 
 MediaInfo probeMedia(const std::string& path) {
+    // Checked before spawning anything, because a missing executable fails in
+    // the forked child: the parent would just see an empty pipe and blame the
+    // input file.  probeMedia runs first for every input, so one check here
+    // covers ffmpeg too.
+    if (!plat::haveExecutable("ffprobe") || !plat::haveExecutable("ffmpeg"))
+        die("ffmpeg and ffprobe must be installed and on PATH.\n"
+            "         macOS:   brew install ffmpeg\n"
+            "         Debian:  sudo apt install ffmpeg\n"
+            "         Windows: winget install Gyan.FFmpeg");
+
     // key=value form: stills report nb_frames=N/A and no usable duration, so
     // positional parsing would misread them.  Match on the key instead.
     plat::Proc p = plat::Proc::spawn({"ffprobe", "-v", "error",
