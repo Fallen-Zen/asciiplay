@@ -20,7 +20,7 @@ jobs:
       TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # v1.0.2 shipped with project(VERSION 1.0.1) still in CMakeLists, so the
       # binary reported the wrong version. Fail the release instead.
