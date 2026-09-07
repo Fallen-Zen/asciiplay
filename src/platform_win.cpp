@@ -29,6 +29,7 @@
 
 #include <conio.h>
 #include <cstdio>
+#include <fcntl.h>   // _O_BINARY; <io.h> declares _setmode but not the modes
 #include <io.h>
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
