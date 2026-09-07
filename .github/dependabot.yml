@@ -1,0 +1,15 @@
+version: 2
+
+# Only the workflow actions are watched. asciiplay itself links nothing and
+# vendors nothing -- ffmpeg is invoked as a child process, so there is no
+# dependency manifest for Dependabot to track.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]      # one PR for all of them, not one PR each
