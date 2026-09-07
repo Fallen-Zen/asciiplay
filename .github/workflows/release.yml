@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write        # to create the release
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      # Optional: a fine-grained PAT with contents:write on homebrew-asciiplay.
+      # Without it the tap step is skipped and the formula is bumped by hand.
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # v1.0.2 shipped with project(VERSION 1.0.1) still in CMakeLists, so the
+      # binary reported the wrong version. Fail the release instead.
+      - name: Tag must match the version in CMakeLists
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cml=$(sed -n 's/^project(asciiplay VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "tag=$tag  CMakeLists=$cml"
+          if [ "$tag" != "$cml" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match" \
+                 "project(asciiplay VERSION $cml) -- bump CMakeLists before tagging"
+            exit 1
+          fi
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Build and smoke-test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+          cmake --install build --prefix "$PWD/stage"
+          "$PWD/stage/bin/asciiplay" --version | grep -q "${GITHUB_REF_NAME#v}"
+          "$PWD/stage/bin/asciiplay" --glyphs braille --cell 2x4 --dither \
+                                     --color none --cols 40 sample.png | head -3
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists -- leaving its notes alone"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "asciiplay ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
+
+      - name: Bump the Homebrew tap
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          sha=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+          echo "url=$url"
+          echo "sha256=$sha"
+
+          git clone --depth 1 \
+            "https://github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-asciiplay.git" tap
+          cd tap
+          sed -i -E "s|url \".*\"|url \"$url\"|; s|sha256 \".*\"|sha256 \"$sha\"|" \
+                 Formula/asciiplay.rb
+          if git diff --quiet; then
+            echo "formula already current"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "asciiplay $version"
+          git remote set-url origin \
+            "https://x-access-token:${TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-asciiplay.git"
+          git push origin HEAD:main

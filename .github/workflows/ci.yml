@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash          # git bash on Windows, so one script works everywhere
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # a Windows-only break should not hide a Linux one
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # asciiplay shells out to ffmpeg instead of linking it, so a runtime test
+      # needs it installed. None of the runners ship it.
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      # Installing gives one predictable path across single- and multi-config
+      # generators, and exercises the install() rule at the same time.
+      - name: Install
+        run: cmake --install build --config Release --prefix "$PWD/stage"
+
+      - name: Locate the binary
+        run: |
+          BIN="$PWD/stage/bin/asciiplay"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          echo "ASCIIPLAY=$BIN" >> "$GITHUB_ENV"
+
+      - name: Reports the version the build claims
+        run: |
+          want=$(sed -n 's/^project(asciiplay VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          got=$("$ASCIIPLAY" --version)
+          echo "CMakeLists=$want  binary=$got"
+          echo "$got" | grep -q "$want"
+
+      - name: Renders a frame
+        run: |
+          out=$("$ASCIIPLAY" --glyphs braille --cell 2x4 --dither --color none \
+                             --cols 60 sample.png)
+          echo "$out" | head -5
+          test -n "$out"
+
+      - name: Renders in colour
+        run: |
+          "$ASCIIPLAY" --glyphs braille --cell 2x4 --dither --color 256 \
+                       --cols 60 sample.png > colour.txt
+          test -s colour.txt
+          grep -q $'\033\[38;5;' colour.txt      # escapes actually emitted
+
+      # The interesting half of the ffmpeg check: it has to name the missing
+      # dependency rather than blame the input file.
+      - name: Diagnoses a missing ffmpeg
+        if: runner.os != 'Windows'
+        run: |
+          msg=$(env PATH=/nonexistent "$ASCIIPLAY" sample.png 2>&1 || true)
+          echo "$msg"
+          echo "$msg" | grep -q "must be installed and on PATH"
