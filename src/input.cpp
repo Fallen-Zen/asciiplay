@@ -38,11 +38,14 @@ Input mouseEvent(int b, int x, int y, bool release) {
         if ((b & 3) <= 1) in.kind = (b & 1) ? Input::WheelDown : Input::WheelUp;
         return in;
     }
+    // Button first: an SGR release still names its button, and a right or
+    // middle release must not end a left drag or bring up the bar.  Legacy
+    // releases (3) do not say which button, so they count as ours.
     const int button = b & 3;
-    if (release || button == 3)  in.kind = Input::MouseRelease;
-    else if (button != 0)        return in;           // middle/right: not ours
-    else if (b & 32)             in.kind = Input::MouseDrag;
-    else                         in.kind = Input::MousePress;
+    if (button == 1 || button == 2)  return in;       // middle/right: not ours
+    if (release || button == 3)      in.kind = Input::MouseRelease;
+    else if (b & 32)                 in.kind = Input::MouseDrag;
+    else                             in.kind = Input::MousePress;
     return in;
 }
 

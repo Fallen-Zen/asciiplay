@@ -198,6 +198,8 @@ TEST(input_wheel) {
 TEST(input_other_buttons_are_left_to_the_terminal) {
     CHECK_EQ(decode("\x1b[<1;5;5M").kind, Input::None);   // middle
     CHECK_EQ(decode("\x1b[<2;5;5M").kind, Input::None);   // right
+    CHECK_EQ(decode("\x1b[<1;5;5m").kind, Input::None);   // middle release
+    CHECK_EQ(decode("\x1b[<2;5;5m").kind, Input::None);   // right release
     CHECK_EQ(decode("\x1b[<34;5;5M").kind, Input::None);  // right-drag
     CHECK_EQ(decode("\x1b[<66;5;5M").kind, Input::None);  // wheel left/right
 }
@@ -216,6 +218,19 @@ TEST(input_legacy_mouse) {
     CHECK_EQ(decode(legacyMouse(32, 12, 5)).kind, Input::MouseDrag);
     CHECK_EQ(decode(legacyMouse(64, 1, 1)).kind, Input::WheelUp);
     CHECK_EQ(decode("\x1b[M!").kind, Input::None);   // cut short
+}
+
+TEST(input_right_click_during_a_left_drag_is_ignored) {
+    Feed f("\x1b[<0;10;30M\x1b[<32;20;30M\x1b[<2;20;30M\x1b[<2;20;30m"
+           "\x1b[<32;40;30M\x1b[<0;40;30m");
+    CHECK_EQ(f.next().kind, Input::MousePress);
+    CHECK_EQ(f.next().kind, Input::MouseDrag);
+    CHECK_EQ(f.next().kind, Input::None);           // right press
+    CHECK_EQ(f.next().kind, Input::None);           // right release
+    Input in = f.next();
+    CHECK_EQ(in.kind, Input::MouseDrag);            // the drag carries on
+    CHECK_EQ(in.x, 39);
+    CHECK_EQ(f.next().kind, Input::MouseRelease);
 }
 
 TEST(input_events_back_to_back) {
