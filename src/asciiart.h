@@ -109,10 +109,12 @@ struct Renderer {
     bool      cellBg = false;
     int       tol = 0;
     int cols = 0, rows = 0;
+    int skipRow = -1;                 // left alone: the seek bar is over it
     std::vector<Cell> prev;
     std::string buf;
 
     void reset(int cols, int rows);
+    void invalidateRow(int y);        // repaint it in full on the next draw
     void draw(const std::vector<Cell>& cur, const GlyphSet& gs);
 };
 

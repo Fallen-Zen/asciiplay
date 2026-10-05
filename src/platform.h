@@ -60,15 +60,29 @@ bool haveExecutable(const std::string& name);
 // scribble over the alternate screen during playback.
 void setChildStderrVisible(bool on);
 
-// Terminal.  enter() switches to the alternate screen, hides the cursor and
-// puts the input stream in raw/unbuffered mode; leave() undoes all of it and
-// is safe to call twice.
+// Terminal.  enter() switches to the alternate screen, hides the cursor, puts
+// the input stream in raw/unbuffered mode and turns on mouse reporting;
+// leave() undoes all of it and is safe to call twice.
 void terminalEnter();
 void terminalLeave();
 bool terminalSize(int& cols, int& rows);
 
-// Non-blocking single-key read.  Returns -1 when nothing is pending.
-int pollKey();
+// One key or mouse event.  Mouse coordinates are 0-based terminal cells, and
+// only the left button is reported -- the others are left to the terminal.
+struct Input {
+    enum Kind {
+        None, Char, Esc,
+        Left, Right, Up, Down, PageUp, PageDown, Home, End,
+        MousePress, MouseDrag, MouseRelease, WheelUp, WheelDown,
+    };
+    Kind kind = None;
+    int  ch = 0;            // Char: the byte typed
+    int  x = 0, y = 0;      // mouse events
+};
+
+// Non-blocking read of the next event.  kind is None when nothing is pending;
+// unrecognised sequences are swallowed rather than returned as stray bytes.
+Input pollInput();
 
 // Ctrl-C / console-close handling.  quitRequested() latches true once the user
 // has asked to stop, so the main loop can unwind and restore the terminal.

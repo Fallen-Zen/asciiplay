@@ -397,6 +397,12 @@ void Renderer::reset(int c, int r) {
     cols = c; rows = r;
     prev.assign((std::size_t)c * r, Cell{});
     for (auto& p : prev) p.g = -2;          // force a full first paint
+    skipRow = -1;
+}
+
+void Renderer::invalidateRow(int y) {
+    if (y < 0 || y >= rows) return;
+    for (int x = 0; x < cols; ++x) prev[(std::size_t)y * cols + x].g = -2;
 }
 
 void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
@@ -406,6 +412,7 @@ void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
     Cell style{};
 
     for (int y = 0; y < rows; ++y) {
+        if (y == skipRow) continue;
         for (int x = 0; x < cols; ++x) {
             std::size_t i = (std::size_t)y * cols + x;
             if (cur[i].sameStyle(prev[i], mode)) continue;

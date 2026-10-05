@@ -164,8 +164,32 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 | `--image` / `--video` | override input type detection |
 | `-V, --version` | print the version and exit |
 
-During playback: `q` or `Esc` quits, `space` pauses. Resizing the terminal
-re-fits the picture and resumes from the same position.
+### Playback controls
+
+| Key | Action |
+|---|---|
+| `space` | pause / resume |
+| `←` / `→` | back / forward 5 s (also the mouse wheel) |
+| `↑` / `↓` | forward / back 1 min (also `PgUp` / `PgDn`) |
+| `0` … `9` | jump to 0% … 90% |
+| `Home` / `End` | start / end |
+| `q` / `Esc` | quit |
+
+Any of these brings up a progress bar on the bottom row; it stays while paused
+and fades two seconds after the last key otherwise, so playback keeps the whole
+screen:
+
+```text
+ ▶ 1:23 ━━━━━━━━━━━━━━━━━●────────────────────────────────────── 4:56
+```
+
+Click anywhere on the bar to jump there, or drag the knob to scrub. Seeking
+while paused shows the frame you land on. This uses the terminal's mouse
+reporting, which every mainstream terminal supports (including over SSH); while
+asciiplay runs, hold `Shift` — `Option` in Terminal.app — to select text with
+the mouse instead.
+
+Resizing the terminal re-fits the picture and resumes from the same position.
 
 ## Choosing a glyph set
 
