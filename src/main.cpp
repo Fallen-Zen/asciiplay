@@ -324,6 +324,12 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
                         aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
                 }
                 break;
+            // Seek keys that could not move, being at an end already, still
+            // show where we are.
+            case I::Left: case I::Right: case I::Up: case I::Down:
+            case I::PageUp: case I::PageDown: case I::Home: case I::End:
+            case I::WheelUp: case I::WheelDown:
+                break;
             case I::MousePress:
                 if (bar.hit(in.y)) { dragging = true; dragTo = bar.timeAt(in.x); }
                 break;
@@ -339,7 +345,11 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         };
 
         while (!plat::quitRequested() && !restart) {
-            if (!dec.readExact(eng.rgb.data(), eng.frameBytes())) break;   // EOF
+            if (!dec.readExact(eng.rgb.data(), eng.frameBytes())) {
+                if (plat::suspendRequested())        // Ctrl-Z cut the read short
+                    stopping = restart = regrid = true;
+                break;                               // otherwise EOF
+            }
 
             target = (double)frame / fps;
             ++frame;

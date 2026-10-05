@@ -31,13 +31,19 @@ double clampSeek(double t, double dur, double reached) {
 
 double seekFor(const plat::Input& in, double from, double dur, double reached) {
     using I = plat::Input;
+    // Within the last second the clamp lies behind `from`; a forward key there
+    // does nothing rather than jump back.
+    auto forward = [&](double t) {
+        t = clampSeek(t, dur, reached);
+        return t > from ? t : -1.0;
+    };
     switch (in.kind) {
     case I::Left:  case I::WheelDown: return clampSeek(from - kStep, dur, reached);
-    case I::Right: case I::WheelUp:   return clampSeek(from + kStep, dur, reached);
+    case I::Right: case I::WheelUp:   return forward(from + kStep);
     case I::Down:  case I::PageDown:  return clampSeek(from - kBigStep, dur, reached);
-    case I::Up:    case I::PageUp:    return clampSeek(from + kBigStep, dur, reached);
+    case I::Up:    case I::PageUp:    return forward(from + kBigStep);
     case I::Home:                     return 0;
-    case I::End:   return dur > 0 ? clampSeek(dur, dur, reached) : -1;
+    case I::End:   return dur > 0 ? forward(dur) : -1;
     case I::Char:
         if (in.ch >= '0' && in.ch <= '9' && dur > 0)
             return clampSeek(dur * (in.ch - '0') / 10.0, dur, reached);

@@ -41,7 +41,8 @@ public:
     static Proc spawn(const std::vector<std::string>& argv, bool pipeStdout);
 
     bool        valid() const;
-    bool        readExact(uint8_t* buf, std::size_t n);  // false at EOF/error
+    bool        readExact(uint8_t* buf, std::size_t n);  // false at EOF/error,
+                                                         // or on quit/suspend
     std::string readAll();
     void        stop();
 

@@ -32,8 +32,8 @@ std::string clockText(double sec, bool hours);
 double clampSeek(double t, double dur, double reached);
 
 // Where a key or wheel event seeks to from `from`, clamped; -1 when the event
-// is not a seek, or is one that cannot apply (a percentage or End with no
-// known length).
+// is not a seek, or is one that cannot apply: a percentage or End with no
+// known length, or a forward key that would not move forward.
 double seekFor(const plat::Input& in, double from, double dur, double reached);
 
 // The progress bar on the terminal's bottom row:  ▶ 1:23 ━━━━●──── 4:56

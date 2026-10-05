@@ -133,8 +133,17 @@ TEST(seek_digits_are_tenths) {
     CHECK_EQ(seekFor(chr('9'), 0, 120, 0), 108.0);
 }
 
+TEST(seek_forward_never_goes_back) {
+    // In the last second the clamp (dur - 1) is behind the frame shown.
+    CHECK_EQ(seekFor(key(Input::Right), 119.5, 120, 0), -1.0);
+    CHECK_EQ(seekFor(key(Input::End), 119.5, 120, 0), -1.0);
+    CHECK_EQ(seekFor(key(Input::Up), 119.0, 120, 0), -1.0);
+    CHECK_EQ(seekFor(key(Input::WheelUp), 118.5, 120, 0), 119.0);
+    CHECK_EQ(seekFor(key(Input::Left), 119.5, 120, 0), 114.5);
+}
+
 TEST(seek_unknown_length) {
-    CHECK_EQ(seekFor(key(Input::Right), 30, 0, 30), 30.0);   // already at the edge
+    CHECK_EQ(seekFor(key(Input::Right), 30, 0, 30), -1.0);   // already at the edge
     CHECK_EQ(seekFor(key(Input::Left), 30, 0, 30), 25.0);
     CHECK_EQ(seekFor(key(Input::Right), 25, 0, 30), 30.0);
     CHECK_EQ(seekFor(key(Input::Home), 30, 0, 30), 0.0);

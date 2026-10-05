@@ -185,7 +185,11 @@ bool Proc::readExact(uint8_t* buf, std::size_t n) {
     while (got < n) {
         ssize_t r = ::read(fd, buf + got, n - got);
         if (r > 0)                   { got += (std::size_t)r; continue; }
-        if (r < 0 && errno == EINTR) { if (g_quit) return false; continue; }
+        if (r < 0 && errno == EINTR) {
+            // Ctrl-Z has to act now, not once a slow decode delivers a frame.
+            if (g_quit || g_suspend) return false;
+            continue;
+        }
         return false;                                   // EOF or hard error
     }
     return true;
