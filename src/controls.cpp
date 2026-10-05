@@ -66,6 +66,10 @@ double SeekBar::timeAt(int x) const {
 }
 
 bool SeekBar::render(double pos, bool paused) {
+    // Never past the end: a container can report a length just short of the
+    // real one, and an hour boundary crossed there would widen the time label
+    // beyond what place() laid out, wrapping the bottom row.
+    if (dur > 0) pos = std::min(pos, dur);
     const long sec  = (long)std::max(0.0, pos);
     const int  knob = trackW > 0
         ? (int)std::lround(std::min(1.0, std::max(0.0, pos / dur)) * (trackW - 1))

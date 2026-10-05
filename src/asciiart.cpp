@@ -24,6 +24,14 @@ void die(const std::string& msg) {
     std::exit(1);
 }
 
+void capGrid(double cols, double rows, int& outCols, int& outRows) {
+    cols = std::max(cols, 1.0);
+    rows = std::max(rows, 1.0);
+    const double k = std::min({1.0, kMaxGrid / cols, kMaxGrid / rows});
+    outCols = std::min(kMaxGrid, std::max(1, (int)std::lround(cols * k)));
+    outRows = std::min(kMaxGrid, std::max(1, (int)std::lround(rows * k)));
+}
+
 std::vector<std::string> splitAny(const std::string& s, const char* seps) {
     std::vector<std::string> out;
     std::string cur;

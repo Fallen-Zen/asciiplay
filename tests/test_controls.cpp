@@ -212,6 +212,15 @@ TEST(bar_fills_exactly_the_row) {
     CHECK_EQ(visible(b.buf).size(), 50u);
 }
 
+TEST(bar_stays_in_its_row_when_playback_overruns_the_length) {
+    // A length reported just short of an hour, and playback past it: the time
+    // label must not grow to "1:00:00" and push the bar off the row.
+    SeekBar b = placed(3599.9, 80, 24);
+    CHECK(b.render(3700, false));
+    CHECK_EQ(visible(b.buf).size(), 80u);
+    CHECK_EQ(indexOf(visible(b.buf), kKnob), b.trackX + b.trackW - 1);
+}
+
 TEST(bar_content) {
     SeekBar b = placed(120, 100, 30);
     CHECK(b.render(60, false));

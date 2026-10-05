@@ -44,6 +44,17 @@ struct Options {
 
 [[noreturn]] void die(const std::string& msg);
 
+// The largest grid side, in cells.  Wider and taller than any real terminal,
+// and small enough that the pixel buffer it implies -- (cols * 8) x (rows * 16),
+// three bytes a pixel -- stays under 400 MB at the limit.
+constexpr int kMaxGrid = 1000;
+
+// Rounds a cols x rows grid to whole cells, at least 1 each way, shrinking it
+// with its shape kept until neither side exceeds kMaxGrid.  Takes doubles so
+// a size derived from an extreme aspect ratio is capped before it becomes an
+// int.
+void capGrid(double cols, double rows, int& outCols, int& outRows);
+
 std::vector<std::string> splitAny(const std::string& s, const char* seps);
 
 // ------------------------------------------------------------ media probe --

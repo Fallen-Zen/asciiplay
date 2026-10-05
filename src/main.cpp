@@ -102,30 +102,23 @@ void pickGrid(const Options& opt, const MediaInfo& mi, const GlyphSet& gs,
     const double srcAR  = (double)mi.h / (double)mi.w;    // height / width
     const double cellAR = (double)gs.ch / (double)gs.cw;
 
-    if (opt.cols > 0 && opt.rows > 0) { cols = opt.cols; rows = opt.rows; return; }
-    if (opt.cols > 0) {
-        cols = opt.cols;
-        rows = std::max(1, (int)std::lround(cols * srcAR / cellAR));
-        return;
+    // Worked in doubles and capped last: an extreme aspect ratio must not
+    // overflow an int before the cap gets to it.
+    double c, r;
+    if (opt.cols > 0 && opt.rows > 0) { c = opt.cols; r = opt.rows; }
+    else if (opt.cols > 0)            { c = opt.cols; r = c * srcAR / cellAR; }
+    else if (opt.rows > 0)            { r = opt.rows; c = r * cellAR / srcAR; }
+    else {
+        c = tc;
+        r = c * srcAR / cellAR;
+        // Video has to fit on screen; a still printed to stdout may scroll.
+        if (isVideo && r > tr) {
+            r = tr;
+            c = r * cellAR / srcAR;
+        }
     }
-    if (opt.rows > 0) {
-        rows = opt.rows;
-        cols = std::max(1, (int)std::lround(rows * cellAR / srcAR));
-        return;
-    }
-    cols = tc;
-    rows = std::max(1, (int)std::lround(cols * srcAR / cellAR));
-    // Video has to fit on screen; a still printed to stdout may scroll.
-    if (isVideo && rows > tr) {
-        rows = tr;
-        cols = std::max(1, (int)std::lround(rows * cellAR / srcAR));
-    }
+    capGrid(c, r, cols, rows);
 }
-
-// Wider and taller than any real terminal, and small enough that the pixel
-// buffer it implies -- (cols * 8) x (rows * 16), three bytes a pixel -- stays
-// under 400 MB at the limit instead of overflowing or exhausting memory.
-constexpr int kMaxGrid = 1000;
 
 Options parseArgs(int argc, char** argv) {
     Options opt;

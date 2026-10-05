@@ -94,6 +94,7 @@ if(ASCIIPLAY_TESTS)
         tests/test_controls.cpp
         tests/test_render.cpp
         tests/test_decoder.cpp
+        tests/test_grid.cpp
     )
     target_link_libraries(asciiplay_tests PRIVATE asciiplay_core)
     asciiplay_tune(asciiplay_tests)
