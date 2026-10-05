@@ -21,12 +21,14 @@
 // and there is nothing to link against.
 
 #include "asciiart.h"
+#include "controls.h"
 #include "platform.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -120,6 +122,11 @@ void pickGrid(const Options& opt, const MediaInfo& mi, const GlyphSet& gs,
     }
 }
 
+// Wider and taller than any real terminal, and small enough that the pixel
+// buffer it implies -- (cols * 8) x (rows * 16), three bytes a pixel -- stays
+// under 400 MB at the limit instead of overflowing or exhausting memory.
+constexpr int kMaxGrid = 1000;
+
 Options parseArgs(int argc, char** argv) {
     Options opt;
     std::vector<std::string> args(argv + 1, argv + argc);
@@ -136,8 +143,14 @@ Options parseArgs(int argc, char** argv) {
             std::printf("asciiplay %s\n", ASCIIPLAY_VERSION);
             std::exit(0);
         }
-        else if (a == "-c" || a == "--cols")    opt.cols = std::atoi(need(i, "--cols").c_str());
-        else if (a == "-r" || a == "--rows")    opt.rows = std::atoi(need(i, "--rows").c_str());
+        else if (a == "-c" || a == "--cols") {
+            opt.cols = std::atoi(need(i, "--cols").c_str());
+            if (opt.cols < 1 || opt.cols > kMaxGrid) die("--cols wants 1.." + std::to_string(kMaxGrid));
+        }
+        else if (a == "-r" || a == "--rows") {
+            opt.rows = std::atoi(need(i, "--rows").c_str());
+            if (opt.rows < 1 || opt.rows > kMaxGrid) die("--rows wants 1.." + std::to_string(kMaxGrid));
+        }
         else if (a == "--cell") {
             auto p = splitAny(need(i, "--cell"), "xX");
             if (p.size() != 2) die("--cell wants WxH, e.g. 4x8");
@@ -217,92 +230,8 @@ int renderStill(const Options& opt, const MediaInfo& mi, const GlyphSet& gs,
     return 0;
 }
 
-// ---- playback controls -----------------------------------------------------
-
-constexpr double kStep      = 5.0;    // Left/Right and the mouse wheel
-constexpr double kBigStep   = 60.0;   // Up/Down, PgUp/PgDn
-constexpr double kBarLinger = 2.0;    // seconds the bar stays up after input
-
-// "4:05", or "1:04:05" once the file runs that long.
-std::string clockText(double sec, bool hours) {
-    const long t = std::max(0L, (long)sec);
-    char b[32];
-    if (hours) std::snprintf(b, sizeof b, "%ld:%02ld:%02ld", t / 3600, t / 60 % 60, t % 60);
-    else       std::snprintf(b, sizeof b, "%ld:%02ld", t / 60, t % 60);
-    return b;
-}
-
-// The progress bar on the terminal's bottom row:  ▶ 1:23 ━━━━●──── 4:56
-// It is drawn on demand -- while paused, while being dragged, and for a moment
-// after a key or click -- so the rest of the time the picture has the screen.
-struct SeekBar {
-    ColorMode mode = ColorMode::True;
-    double dur = 0;              // <= 0: length unknown, so no slider
-    bool   hours = false;
-    int    row = 0, width = 0;   // 0-based terminal row; width in columns
-    int    label = 0;            // columns in each time label
-    int    trackX = 0, trackW = 0;
-    bool   shown = false;
-    std::string last;            // what is on screen, so repeats cost nothing
-
-    void place(int tc, int tr) {
-        row = tr - 1;
-        width = tc;
-        hours = dur >= 3600;
-        label = (int)clockText(std::max(dur, 0.0), hours).size();
-        trackX = label + 4;                         // " ▶ " label " "
-        trackW = width - trackX - (label + 2);      // " " label " "
-        if (dur <= 0 || trackW < 8) trackW = 0;
-        shown = false;
-        last.clear();
-    }
-
-    bool   hit(int y) const { return trackW > 0 && y == row; }
-    double timeAt(int x) const {
-        const double f = (double)(x - trackX) / std::max(1, trackW - 1);
-        return std::min(1.0, std::max(0.0, f)) * dur;
-    }
-
-    void draw(double pos, bool paused) {
-        std::string now = clockText(pos, hours || pos >= 3600);
-        if ((int)now.size() < label) now.insert(0, label - now.size(), ' ');
-        if (width < (int)now.size() + 3) return;    // no room for anything
-
-        const bool col = mode != ColorMode::None;
-        char t[32];
-        std::snprintf(t, sizeof t, "\x1b[%d;1H", row + 1);
-        std::string s = t;
-        if (col) s += "\x1b[0;48;5;236;38;5;252m";
-        s += paused ? " ‖ " : " ▶ ";      // ‖ or ▶
-        s += now;
-        if (trackW > 0) {
-            const int k = (int)std::lround(std::min(1.0, std::max(0.0, pos / dur))
-                                           * (trackW - 1));
-            s += ' ';
-            if (col) s += "\x1b[38;5;45m";
-            for (int i = 0; i < k; ++i) s += "━";         // ━
-            if (col) s += "\x1b[38;5;231m";
-            s += "●";                                      // ●
-            if (col) s += "\x1b[38;5;240m";
-            for (int i = k + 1; i < trackW; ++i) s += "─"; // ─
-            if (col) s += "\x1b[38;5;252m";
-            s += ' ' + clockText(dur, hours) + ' ';
-        } else {
-            s.append(width - 3 - now.size(), ' ');
-        }
-        s += "\x1b[0m";
-        if (s != last) { plat::writeOut(s); last = s; }
-        shown = true;
-    }
-
-    void erase() {
-        char t[48];
-        int n = std::snprintf(t, sizeof t, "\x1b[%d;1H\x1b[0m\x1b[2K", row + 1);
-        plat::writeOut(t, (std::size_t)n);
-        shown = false;
-        last.clear();
-    }
-};
+// Seconds the bar stays up after a key or click.
+constexpr double kBarLinger = 2.0;
 
 int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     const double fps = opt.fps > 0 ? opt.fps : mi.fps;
@@ -328,13 +257,8 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     bool   painted = false;            // eng.cells is what is on screen
     bool   dragging = false;
     double dragTo = 0, barUntil = -1;
-
-    // Stopping a second short of the end gives End and Right something to
-    // show instead of finishing playback outright.
-    auto clampSeek = [&](double t) {
-        if (dur > 0) t = std::min(t, std::max(0.0, dur - 1.0));
-        return std::max(0.0, t);
-    };
+    double reached = 0;                // furthest media time shown so far
+    bool   seekByDecoding = false;     // the input cannot jump to a time
 
     for (;;) {                         // one pass; restarts on resize, seek or --loop
         int lastTc = 0, lastTr = 0;
@@ -351,7 +275,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         }
 
         plat::Proc dec = plat::Proc::spawn(
-            decoderArgs(opt.path, eng.pw, eng.ph, true, fps, seek), true);
+            decoderArgs(opt.path, eng.pw, eng.ph, true, fps, seek, seekByDecoding), true);
         if (!dec.valid()) { plat::terminalLeave(); die("could not start ffmpeg"); }
 
         plat::Proc aud;
@@ -363,6 +287,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         double want = -1;              // pending seek, in media seconds
         long   frame = 0;
         bool   restart = false;
+        bool   stopping = false;       // Ctrl-Z: suspend once the children are gone
 
         // Brings the bar up, keeps it current, or takes it down and repaints
         // the picture underneath.
@@ -371,9 +296,9 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
             const int vrow = bar.row < ren.rows ? bar.row : -1;
             if (up) {
                 ren.skipRow = vrow;
-                bar.draw(dragging ? dragTo : showing, paused);
+                if (bar.render(dragging ? dragTo : showing, paused)) plat::writeOut(bar.buf);
             } else if (bar.shown) {
-                bar.erase();
+                plat::writeOut(bar.clear());
                 ren.skipRow = -1;
                 ren.invalidateRow(vrow);
                 if (painted) ren.draw(eng.cells, gs);
@@ -385,32 +310,27 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         auto handle = [&](const plat::Input& in) {
             using I = plat::Input;
             const double from = want >= 0 ? want : showing;
+            const double to = seekFor(in, from, dur, reached);
+            if (to >= 0) {
+                want = to;
+                barUntil = plat::nowSeconds() + kBarLinger;
+                return;
+            }
             switch (in.kind) {
             case I::Esc:   plat::requestQuit(); return;
             case I::Char:
                 if (in.ch == 'q' || in.ch == 'Q') { plat::requestQuit(); return; }
-                if (in.ch == ' ') {
-                    paused = !paused;
-                    if (paused) {
-                        pauseStart = plat::nowSeconds();
-                        aud.stop();
-                    } else {
-                        pauseAccum += plat::nowSeconds() - pauseStart;
-                        if (opt.audio && want < 0)
-                            aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
-                    }
-                } else if (in.ch >= '0' && in.ch <= '9' && dur > 0) {
-                    want = clampSeek(dur * (in.ch - '0') / 10.0);
+                if (in.ch != ' ') return;      // not ours: leave the bar alone
+                paused = !paused;
+                if (paused) {
+                    pauseStart = plat::nowSeconds();
+                    aud.stop();
                 } else {
-                    return;            // not ours: leave the bar alone
+                    pauseAccum += plat::nowSeconds() - pauseStart;
+                    if (opt.audio && want < 0)
+                        aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
                 }
                 break;
-            case I::Left:  case I::WheelDown: want = clampSeek(from - kStep);    break;
-            case I::Right: case I::WheelUp:   want = clampSeek(from + kStep);    break;
-            case I::Down:  case I::PageDown:  want = clampSeek(from - kBigStep); break;
-            case I::Up:    case I::PageUp:    want = clampSeek(from + kBigStep); break;
-            case I::Home:                     want = 0;                          break;
-            case I::End:   if (dur > 0) want = clampSeek(dur);                   break;
             case I::MousePress:
                 if (bar.hit(in.y)) { dragging = true; dragTo = bar.timeAt(in.x); }
                 break;
@@ -418,7 +338,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
                 if (dragging) dragTo = bar.timeAt(in.x);
                 break;
             case I::MouseRelease:
-                if (dragging) { dragging = false; want = clampSeek(dragTo); }
+                if (dragging) { dragging = false; want = clampSeek(dragTo, dur, reached); }
                 break;
             default: return;
             }
@@ -452,6 +372,11 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
                     if (painted) ren.draw(eng.cells, gs);
                 }
 
+                if (plat::suspendRequested()) {
+                    stopping = restart = regrid = true;
+                    break;
+                }
+
                 for (plat::Input in; (in = plat::pollInput()).kind != plat::Input::None; )
                     handle(in);
                 if (plat::quitRequested()) break;
@@ -472,6 +397,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
             ren.draw(eng.cells, gs);
             painted = true;
             showing = seek + target;
+            reached = std::max(reached, showing);
             ++shown;
             updateBar();
         }
@@ -479,9 +405,20 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         dec.stop();
         aud.stop();
 
+        if (stopping) {                     // returns on `fg`; repaints below
+            plat::suspend();
+            dragging = false;               // the release went to the shell
+        }
         if (plat::quitRequested()) break;
         if (want >= 0) { seek = want; continue; }
-        if (restart) {                 // resized: carry on from the frame shown
+        // Nothing at all from a seek: raw streams make ffmpeg's input seek
+        // fail outright.  Seeking by decoding gets there on anything; the
+        // clamps keep the target inside the file, so this is never the end.
+        if (frame == 0 && seek > 0.01 && !restart && !seekByDecoding) {
+            seekByDecoding = true;
+            continue;
+        }
+        if (restart) {                 // resized or resumed: carry on from the frame shown
             seek = showing;
             if (dur > 0 && seek >= dur) break;
             continue;
@@ -498,9 +435,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     return 0;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Options opt = parseArgs(argc, argv);
 
     if (FILE* f = std::fopen(opt.path.c_str(), "rb")) std::fclose(f);
@@ -516,4 +451,18 @@ int main(int argc, char** argv) {
     if (!isVideo || !opt.out.empty())
         return renderStill(opt, mi, gs, isVideo);
     return playVideo(opt, mi, gs);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // An exception escaping playback (bad_alloc on a huge grid, a thread that
+    // will not start) would otherwise leave the shell in the alternate screen
+    // with mouse reporting on.  die() restores the terminal; by the time we
+    // get here, unwinding has already stopped ffmpeg and ffplay.
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        die(e.what());
+    }
 }

@@ -23,51 +23,81 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
                  Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-add_executable(asciiplay
-    src/main.cpp
+# Everything but main() is a library, so the unit tests link the same code
+# the player runs.
+add_library(asciiplay_core STATIC
     src/asciiart.cpp
+    src/controls.cpp
+    src/input.cpp
     src/platform_posix.cpp
     src/platform_win.cpp        # each guards itself with #ifdef; only one compiles
 )
+target_include_directories(asciiplay_core PUBLIC src)
 
-target_include_directories(asciiplay PRIVATE src)
+add_executable(asciiplay src/main.cpp)
+target_link_libraries(asciiplay PRIVATE asciiplay_core)
 target_compile_definitions(asciiplay PRIVATE
                            ASCIIPLAY_VERSION="${PROJECT_VERSION}")
 
 # ---- threads ---------------------------------------------------------------
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
-target_link_libraries(asciiplay PRIVATE Threads::Threads)
+target_link_libraries(asciiplay_core PUBLIC Threads::Threads)
 
 # ---- per-compiler tuning ---------------------------------------------------
 include(CheckCXXCompilerFlag)
 
-if(MSVC)
-    target_compile_options(asciiplay PRIVATE /W4 /permissive- /utf-8)
-    target_compile_options(asciiplay PRIVATE $<$<CONFIG:Release>:/O2 /fp:fast>)
-    target_compile_definitions(asciiplay PRIVATE
-        _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-else()
-    target_compile_options(asciiplay PRIVATE -Wall -Wextra -Wno-unused-parameter)
-    target_compile_options(asciiplay PRIVATE $<$<CONFIG:Release>:-O3 -ffast-math>)
+# Applied to every target, so the tests are built the way the player is.
+option(ASCIIPLAY_NATIVE "Tune for the building machine's CPU" OFF)
 
-    # Native tuning: the flag differs between x86 and Apple Silicon.  Off by
-    # default, because a binary built with it runs only on CPUs at least as new
-    # as the one that built it -- which is fine for your own machine and wrong
-    # for anything anyone else installs (Homebrew bottles, distro packages, a
-    # binary copied to another box).  Turn it on for a local build.
-    option(ASCIIPLAY_NATIVE "Tune for the building machine's CPU" OFF)
-    if(ASCIIPLAY_NATIVE)
-        check_cxx_compiler_flag("-march=native" HAVE_MARCH_NATIVE)
-        if(HAVE_MARCH_NATIVE)
-            target_compile_options(asciiplay PRIVATE $<$<CONFIG:Release>:-march=native>)
-        else()
-            check_cxx_compiler_flag("-mcpu=native" HAVE_MCPU_NATIVE)
-            if(HAVE_MCPU_NATIVE)   # Apple Silicon / arm64 clang
-                target_compile_options(asciiplay PRIVATE $<$<CONFIG:Release>:-mcpu=native>)
+function(asciiplay_tune target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+        target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:/O2 /fp:fast>)
+        target_compile_definitions(${target} PRIVATE
+            _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+        target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-O3 -ffast-math>)
+
+        # Native tuning: the flag differs between x86 and Apple Silicon.  Off by
+        # default, because a binary built with it runs only on CPUs at least as new
+        # as the one that built it -- which is fine for your own machine and wrong
+        # for anything anyone else installs (Homebrew bottles, distro packages, a
+        # binary copied to another box).  Turn it on for a local build.
+        if(ASCIIPLAY_NATIVE)
+            check_cxx_compiler_flag("-march=native" HAVE_MARCH_NATIVE)
+            if(HAVE_MARCH_NATIVE)
+                target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-march=native>)
+            else()
+                check_cxx_compiler_flag("-mcpu=native" HAVE_MCPU_NATIVE)
+                if(HAVE_MCPU_NATIVE)   # Apple Silicon / arm64 clang
+                    target_compile_options(${target} PRIVATE $<$<CONFIG:Release>:-mcpu=native>)
+                endif()
             endif()
         endif()
     endif()
+endfunction()
+
+asciiplay_tune(asciiplay_core)
+asciiplay_tune(asciiplay)
+
+# ---- unit tests ------------------------------------------------------------
+# A plain executable with its own tiny runner: asciiplay links nothing, and
+# its tests do not either.  ctest --test-dir build -C Release
+option(ASCIIPLAY_TESTS "Build the unit tests" ON)
+if(ASCIIPLAY_TESTS)
+    enable_testing()
+    add_executable(asciiplay_tests
+        tests/test_main.cpp
+        tests/test_input.cpp
+        tests/test_controls.cpp
+        tests/test_render.cpp
+        tests/test_decoder.cpp
+    )
+    target_link_libraries(asciiplay_tests PRIVATE asciiplay_core)
+    asciiplay_tune(asciiplay_tests)
+    add_test(NAME unit COMMAND asciiplay_tests)
 endif()
 
 # ---- warn early if ffmpeg is missing ---------------------------------------

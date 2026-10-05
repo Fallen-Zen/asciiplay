@@ -90,6 +90,13 @@ void installQuitHandler();
 bool quitRequested();
 void requestQuit();
 
+// Ctrl-Z.  suspendRequested() reports a pending stop; suspend() restores the
+// terminal, stops the process the way the shell expects, and on `fg` sets the
+// terminal up again as terminalEnter() did.  The caller stops its children
+// first.  Windows has no job control, so there it is never requested.
+bool suspendRequested();
+void suspend();
+
 // ---- portable helpers -----------------------------------------------------
 
 inline double nowSeconds() {

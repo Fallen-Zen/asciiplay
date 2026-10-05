@@ -12,13 +12,13 @@
 #if !defined(_WIN32)
 
 #include "platform.h"
+#include "input.h"
 
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>   // getenv/setenv
 #include <cstring>
-#include <string>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -38,9 +38,17 @@ namespace {
 inline void*  enc(long v)   { return reinterpret_cast<void*>(v + 1); }
 inline long   dec(void* p)  { return p ? reinterpret_cast<long>(p) - 1 : -1; }
 
-volatile sig_atomic_t g_quit = 0;
+volatile sig_atomic_t g_quit = 0, g_suspend = 0;
 bool g_childStderr = false;
-void onSignal(int) { g_quit = 1; }
+void onSignal(int)  { g_quit = 1; }
+void onSuspend(int) { g_suspend = 1; }
+
+void catchSuspend() {
+    struct sigaction sa {};
+    sa.sa_handler = onSuspend;
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGTSTP, &sa, nullptr);
+}
 
 termios g_saved{};
 bool    g_raw = false, g_alt = false;
@@ -56,47 +64,6 @@ int readByte(int ms) {
     if (::poll(&pfd, 1, ms) <= 0) return -1;
     unsigned char c;
     return ::read(STDIN_FILENO, &c, 1) == 1 ? c : -1;
-}
-
-// b is the xterm button byte: low two bits the button (3 = released, in the
-// legacy encoding), +32 motion, +64 wheel.  x and y arrive 1-based.
-Input mouseEvent(int b, int x, int y, bool release) {
-    Input in;
-    in.x = x - 1;
-    in.y = y - 1;
-    if (b & 64) {
-        if ((b & 3) <= 1) in.kind = (b & 1) ? Input::WheelDown : Input::WheelUp;
-        return in;
-    }
-    const int button = b & 3;
-    if (release || button == 3)  in.kind = Input::MouseRelease;
-    else if (button != 0)        return in;           // middle/right: not ours
-    else if (b & 32)             in.kind = Input::MouseDrag;
-    else                         in.kind = Input::MousePress;
-    return in;
-}
-
-Input keyFor(int final, int param) {
-    Input in;
-    switch (final) {
-        case 'A': in.kind = Input::Up;    break;
-        case 'B': in.kind = Input::Down;  break;
-        case 'C': in.kind = Input::Right; break;
-        case 'D': in.kind = Input::Left;  break;
-        case 'H': in.kind = Input::Home;  break;
-        case 'F': in.kind = Input::End;   break;
-        case '~':
-            switch (param) {
-                case 1: case 7: in.kind = Input::Home;     break;
-                case 4: case 8: in.kind = Input::End;      break;
-                case 5:         in.kind = Input::PageUp;   break;
-                case 6:         in.kind = Input::PageDown; break;
-                default: break;
-            }
-            break;
-        default: break;
-    }
-    return in;
 }
 
 } // namespace
@@ -246,8 +213,21 @@ void Proc::stop() {
     if (pid > 0) {
         ::kill(-pid, SIGTERM);      // the whole group ffmpeg may have started
         ::kill(pid, SIGTERM);
+        // A second's grace, then SIGKILL: every seek stops the children, and
+        // one that ignores SIGTERM must not hang playback or our exit.
         int st = 0;
-        while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        const double deadline = nowSeconds() + 1.0;
+        for (;;) {
+            const pid_t r = ::waitpid(pid, &st, WNOHANG);
+            if (r == pid || (r < 0 && errno != EINTR)) break;
+            if (nowSeconds() > deadline) {
+                ::kill(-pid, SIGKILL);
+                ::kill(pid, SIGKILL);
+                while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+                break;
+            }
+            sleepMs(2);
+        }
         proc_ = nullptr;
     }
 }
@@ -289,41 +269,7 @@ bool terminalSize(int& cols, int& rows) {
     return false;
 }
 
-Input pollInput() {
-    Input in;
-    const int c = readByte(0);
-    if (c < 0) return in;
-    if (c != 27) { in.kind = Input::Char; in.ch = c; return in; }
-
-    // A bare Esc and the start of an escape sequence begin with the same byte.
-    // The rest of a sequence is sent in the same write, so a short wait for a
-    // second byte tells them apart, even over SSH.
-    const int c1 = readByte(25);
-    if (c1 < 0) { in.kind = Input::Esc; return in; }
-    if (c1 == 'O') return keyFor(readByte(25), 0);      // application cursor keys
-    if (c1 != '[') return in;                           // Alt+key: ignore
-
-    std::string params;
-    int f;
-    for (;;) {                                          // CSI params, then final
-        f = readByte(25);
-        if (f < 0 || params.size() > 32) return in;
-        if (f >= 0x40 && f <= 0x7e) break;
-        params += (char)f;
-    }
-
-    if (f == 'M' && params.empty()) {                   // legacy mouse: 3 raw bytes
-        const int b = readByte(25), x = readByte(25), y = readByte(25);
-        if (b < 0 || x < 0 || y < 0) return in;
-        return mouseEvent(b - 32, x - 32, y - 32, false);
-    }
-    if (!params.empty() && params[0] == '<' && (f == 'M' || f == 'm')) {
-        int b = 0, x = 0, y = 0;                        // SGR mouse: <b;x;y
-        if (std::sscanf(params.c_str() + 1, "%d;%d;%d", &b, &x, &y) != 3) return in;
-        return mouseEvent(b, x, y, f == 'm');
-    }
-    return keyFor(f, std::atoi(params.c_str()));        // "5" of 5~, "1" of 1;5C
-}
+Input pollInput() { return decodeInput(readByte); }
 
 void setChildStderrVisible(bool on) { g_childStderr = on; }
 
@@ -331,13 +277,29 @@ void installQuitHandler() {
     struct sigaction sa {};
     sa.sa_handler = onSignal;
     sigemptyset(&sa.sa_mask);
+    // Every way the terminal can ask us to stop has to run terminalLeave(), or
+    // the shell is left in the alternate screen with mouse reporting on.
     ::sigaction(SIGINT, &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
+    ::sigaction(SIGHUP, &sa, nullptr);
+    ::sigaction(SIGQUIT, &sa, nullptr);
     ::signal(SIGPIPE, SIG_IGN);   // ffmpeg dying must not kill us
+    catchSuspend();
 }
 
 bool quitRequested() { return g_quit != 0; }
 void requestQuit()   { g_quit = 1; }
+
+bool suspendRequested() { return g_suspend != 0; }
+
+void suspend() {
+    g_suspend = 0;
+    terminalLeave();
+    ::signal(SIGTSTP, SIG_DFL);
+    ::raise(SIGTSTP);             // stopped here until the shell sends SIGCONT
+    catchSuspend();
+    terminalEnter();
+}
 
 void writeOut(const char* p, std::size_t n) {
     std::size_t off = 0;

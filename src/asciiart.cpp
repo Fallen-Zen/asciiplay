@@ -107,12 +107,15 @@ static std::string num(double v) {
 }
 
 std::vector<std::string> decoderArgs(const std::string& path, int pw, int ph,
-                                     bool isVideo, double fps, double seek) {
+                                     bool isVideo, double fps, double seek,
+                                     bool seekByDecoding) {
     // -nostdin matters: without it ffmpeg polls the terminal for interactive
     // keys, and in its own process group that raises SIGTTIN and stops it dead.
     std::vector<std::string> a = {"ffmpeg", "-nostdin", "-v", "error"};
-    if (seek > 0.01) { a.push_back("-ss"); a.push_back(num(seek)); }
+    const bool seeking = seek > 0.01;
+    if (seeking && !seekByDecoding) { a.push_back("-ss"); a.push_back(num(seek)); }
     a.push_back("-i"); a.push_back(path);
+    if (seeking && seekByDecoding)  { a.push_back("-ss"); a.push_back(num(seek)); }
 
     std::string vf = "scale=" + std::to_string(pw) + ":" + std::to_string(ph)
                    + ":flags=bilinear";
@@ -406,6 +409,10 @@ void Renderer::invalidateRow(int y) {
 }
 
 void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
+    if (compose(cur, gs)) plat::writeOut(buf);
+}
+
+bool Renderer::compose(const std::vector<Cell>& cur, const GlyphSet& gs) {
     buf.clear();
     int curX = -99, curY = -99;
     bool styled = false;
@@ -441,9 +448,9 @@ void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
             if (!cellBg) buf.insert(0, "\x1b[49m");
             buf += "\x1b[0m";
         }
-        plat::writeOut(buf);
     }
     prev = cur;
+    return !buf.empty();
 }
 
 // ------------------------------------------------------------------ engine --

@@ -118,6 +118,12 @@ cmake --build build --config Release -j
 
 The binary lands at `build/asciiplay` (`build/Release/asciiplay.exe` on MSVC).
 
+Unit tests build alongside it (`-DASCIIPLAY_TESTS=OFF` skips them):
+
+```sh
+ctest --test-dir build -C Release --output-on-failure
+```
+
 For Visual Studio or Xcode project files:
 
 ```sh

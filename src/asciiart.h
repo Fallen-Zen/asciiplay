@@ -56,9 +56,13 @@ struct MediaInfo {
 
 MediaInfo probeMedia(const std::string& path);
 
-// argv for the ffmpeg/ffplay children.
+// argv for the ffmpeg/ffplay children.  seek normally goes before -i, which
+// jumps straight there; seekByDecoding puts it after, which decodes from the
+// start and discards up to it -- slow, but it works on inputs that cannot be
+// seeked, such as raw H.264 streams.
 std::vector<std::string> decoderArgs(const std::string& path, int pw, int ph,
-                                     bool isVideo, double fps, double seek);
+                                     bool isVideo, double fps, double seek,
+                                     bool seekByDecoding = false);
 std::vector<std::string> audioArgs(const std::string& path, double seek);
 
 // ---------------------------------------------------------------- glyphset --
@@ -115,7 +119,11 @@ struct Renderer {
 
     void reset(int cols, int rows);
     void invalidateRow(int y);        // repaint it in full on the next draw
-    void draw(const std::vector<Cell>& cur, const GlyphSet& gs);
+    void draw(const std::vector<Cell>& cur, const GlyphSet& gs);   // compose + write
+
+    // Builds the escapes for cur into buf without writing them; false when
+    // nothing changed.
+    bool compose(const std::vector<Cell>& cur, const GlyphSet& gs);
 };
 
 // ------------------------------------------------------------------ engine --

@@ -46,7 +46,7 @@ bool g_childStderr = false;
 
 DWORD g_outModeSaved = 0, g_inModeSaved = 0;
 UINT  g_cpSaved = 0;
-bool  g_modeSaved = false, g_alt = false;
+bool  g_outSaved = false, g_inSaved = false, g_alt = false;
 bool  g_leftDown = false;       // a release only counts after our own press
 
 BOOL WINAPI ctrlHandler(DWORD type) {
@@ -213,8 +213,13 @@ void terminalEnter() {
     g_cpSaved = GetConsoleOutputCP();
     SetConsoleOutputCP(CP_UTF8);                    // block glyphs are UTF-8
 
-    if (GetConsoleMode(out, &g_outModeSaved) && GetConsoleMode(in, &g_inModeSaved)) {
+    // Output and input are set up independently: with stdin piped in, stdout
+    // is still a console and still needs VT processing for the escapes.
+    if (GetConsoleMode(out, &g_outModeSaved)) {
         SetConsoleMode(out, g_outModeSaved | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        g_outSaved = true;
+    }
+    if (GetConsoleMode(in, &g_inModeSaved)) {
         // Mouse events as input records.  Quick-edit has to go, or a click
         // starts a text selection (and freezes our output) instead.  VT input
         // goes too, so keys arrive with virtual-key codes, not escape bytes.
@@ -222,7 +227,7 @@ void terminalEnter() {
                                            ENABLE_QUICK_EDIT_MODE |
                                            ENABLE_VIRTUAL_TERMINAL_INPUT);
         SetConsoleMode(in, m | ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT);
-        g_modeSaved = true;
+        g_inSaved = true;
     }
     _setmode(_fileno(stdout), _O_BINARY);           // do not translate \n
     std::fputs("\x1b[?1049h\x1b[?25l", stdout);
@@ -236,10 +241,16 @@ void terminalLeave() {
         std::fflush(stdout);
         g_alt = false;
     }
-    if (g_modeSaved) {
+    if (g_outSaved) {
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), g_outModeSaved);
-        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE),  g_inModeSaved);
-        g_modeSaved = false;
+        g_outSaved = false;
+    }
+    if (g_inSaved) {
+        // The quick-edit bit is only applied alongside ENABLE_EXTENDED_FLAGS,
+        // and the saved mode need not carry it.
+        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE),
+                       g_inModeSaved | ENABLE_EXTENDED_FLAGS);
+        g_inSaved = false;
     }
     if (g_cpSaved) { SetConsoleOutputCP(g_cpSaved); g_cpSaved = 0; }
 }
@@ -323,6 +334,9 @@ void installQuitHandler() { SetConsoleCtrlHandler(ctrlHandler, TRUE); }
 
 bool quitRequested() { return InterlockedCompareExchange(&g_quit, 0, 0) != 0; }
 void requestQuit()   { InterlockedExchange(&g_quit, 1); }
+
+bool suspendRequested() { return false; }
+void suspend() {}
 
 void writeOut(const char* p, std::size_t n) {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
