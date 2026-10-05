@@ -1,0 +1,71 @@
+name: Claude Code Review
+
+# Reviews every pull request when it is opened, marked ready, reopened or pushed to.
+# Drafts are skipped until they are marked ready for review.
+#
+# Needs the Claude GitHub App installed on the repository and a CLAUDE_CODE_OAUTH_TOKEN
+# repository secret (`claude setup-token`). The action only runs when this file is identical
+# to the copy on the default branch, so a pull request that changes it is not reviewed.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is checked out in the working directory.
+            This is asciiplay, a portable C++17 terminal player that renders images and video
+            as shape-matched ASCII art. The CI workflow builds and smoke-tests every PR on
+            Linux, macOS and Windows, so review by reading the code -- do not try to build it.
+
+            Hold the change to how the project is put together:
+            - portable C++17 everywhere except platform_posix.cpp and platform_win.cpp; any
+              OS-specific code goes behind platform.h, and both implementations stay in step
+            - ffmpeg, ffprobe and ffplay are child processes over pipes, never linked
+            - children must not touch the terminal: stdin detached, own process group, killed
+              (with their group) on stop, and nothing left running after asciiplay exits
+            - every terminal mode asciiplay sets (raw input, alternate screen, cursor, mouse
+              reporting, console modes on Windows) is undone on every exit path, Ctrl-C included
+            - the render loop is the hot path: no per-frame allocation or redundant escape
+              sequences without a reason
+            - comments describe the code as it is now, never its history; match the comment
+              density and style of the surrounding code
+            - user-visible behaviour changes are reflected in --help (usage() in main.cpp) and
+              README.md; project(VERSION) in CMakeLists.txt is what a release tag must match
+
+            Look for real defects first: logic errors, off-by-one and 0- vs 1-based coordinate
+            mistakes, signed/unsigned and integer-overflow bugs, undefined behaviour, races
+            between the matcher threads, child-process and file-descriptor/handle leaks, input
+            parsing that can block or misread a byte stream, and code that compiles on one
+            platform but not another. Skip pure style preferences.
+
+            Use `mcp__github_inline_comment__create_inline_comment` (with `confirmed: true`) for each
+            specific issue, on the line it concerns. Finish with one `gh pr comment` summarising the
+            review; if you found nothing worth raising, say so in that comment.
+            Only post GitHub comments — don't return the review as a message.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
