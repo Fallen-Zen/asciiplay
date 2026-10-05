@@ -273,8 +273,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         seekByDecoding = false;        // one retry, for this seek only
         if (!dec.valid()) { plat::terminalLeave(); die("could not start ffmpeg"); }
 
-        plat::Proc aud;
-        if (opt.audio && !paused) aud = plat::Proc::spawn(audioArgs(opt.path, seek), false);
+        plat::Proc aud;                // started with the first frame, below
 
         double t0 = plat::nowSeconds();
         double pauseAccum = 0, pauseStart = t0, target = 0;
@@ -322,7 +321,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
                     aud.stop();
                 } else {
                     pauseAccum += plat::nowSeconds() - pauseStart;
-                    if (opt.audio && want < 0)
+                    if (opt.audio && want < 0 && frame > 0)
                         aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
                 }
                 break;
@@ -400,6 +399,10 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
                 t0 = plat::nowSeconds();
                 pauseStart = t0;
                 pauseAccum = 0;
+                // Sound starts on the same instant as the picture, however
+                // long the decoder took to get here.
+                if (opt.audio && !paused)
+                    aud = plat::Proc::spawn(audioArgs(opt.path, seek), false);
                 if (paused) {                            // seeked while paused:
                     eng.process();                       // show where it landed
                     ren.draw(eng.cells, gs);
@@ -451,6 +454,9 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
             if (dur > 0 && seek >= dur) break;
             continue;
         }
+        // Not a single frame from the start of the file: there is nothing to
+        // loop, and retrying at once would spin on a decoder that keeps failing.
+        if (frame == 0 && seek <= 0.01) break;
         if (opt.loop) { seek = 0; continue; }
         break;
     }
