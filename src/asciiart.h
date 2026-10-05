@@ -45,8 +45,9 @@ struct Options {
 [[noreturn]] void die(const std::string& msg);
 
 // The largest grid side, in cells.  Wider and taller than any real terminal,
-// and small enough that the pixel buffer it implies -- (cols * 8) x (rows * 16),
-// three bytes a pixel -- stays under 400 MB at the limit.
+// and small enough that the buffers it implies -- (cols * 8) x (rows * 16)
+// pixels as RGB bytes, plus float luma and per-cell blocks -- stay around
+// 1.4 GB at 1000 x 1000 instead of overflowing or exhausting memory.
 constexpr int kMaxGrid = 1000;
 
 // Rounds a cols x rows grid to whole cells, at least 1 each way, shrinking it

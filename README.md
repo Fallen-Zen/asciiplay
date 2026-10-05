@@ -196,6 +196,8 @@ asciiplay runs, hold `Shift` — `Option` in Terminal.app — to select text wit
 the mouse instead.
 
 Resizing the terminal re-fits the picture and resumes from the same position.
+`Ctrl-Z` suspends cleanly and `fg` picks up where it stopped; `Ctrl-C`, `Ctrl-\`
+and closing the terminal all quit with the terminal put back as it was.
 
 ## Choosing a glyph set
 
