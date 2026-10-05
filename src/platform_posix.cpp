@@ -12,12 +12,14 @@
 #if !defined(_WIN32)
 
 #include "platform.h"
+#include "input.h"
 
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>   // getenv/setenv
 #include <cstring>
+#include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -37,12 +39,88 @@ namespace {
 inline void*  enc(long v)   { return reinterpret_cast<void*>(v + 1); }
 inline long   dec(void* p)  { return p ? reinterpret_cast<long>(p) - 1 : -1; }
 
-volatile sig_atomic_t g_quit = 0;
+volatile sig_atomic_t g_quit = 0, g_suspend = 0;
 bool g_childStderr = false;
-void onSignal(int) { g_quit = 1; }
+void onSignal(int)  { g_quit = 1; }
+void onSuspend(int) { g_suspend = 1; }
+
+void catchSuspend() {
+    struct sigaction sa {};
+    sa.sa_handler = onSuspend;
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGTSTP, &sa, nullptr);
+}
 
 termios g_saved{};
 bool    g_raw = false, g_alt = false;
+
+// Mouse reporting: 1000 clicks, 1002 drags with a button held, 1006 the SGR
+// encoding (no 223-column limit, and releases say which button).
+const char kMouseOn[]  = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const char kMouseOff[] = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+
+// Over SSH, XDG_RUNTIME_DIR is often unset.  Without it ffplay cannot find
+// the PipeWire/PulseAudio socket, falls back to raw ALSA, fails to open the
+// device, and exits -- silently, from the user's point of view.  Point it at
+// the session's runtime directory when one exists.  Done in our own
+// environment, before forking: a forked child must not allocate, and setenv
+// does.
+void pointAtRuntimeDir() {
+    if (::getenv("XDG_RUNTIME_DIR")) return;
+    char rt[64];
+    std::snprintf(rt, sizeof rt, "/run/user/%u", (unsigned)::getuid());
+    struct stat st{};
+    if (::stat(rt, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == ::getuid())
+        ::setenv("XDG_RUNTIME_DIR", rt, 1);
+}
+
+#if !defined(__linux__)
+// Without PR_SET_PDEATHSIG, nothing ends a child when we are killed outright,
+// and ffplay would play on.  Each child is spawned under a watchdog instead,
+// which holds the read end of this "lifeline" pipe.  We hold the only write
+// end and never write to it, so the watchdog sees EOF exactly when we die.
+int g_lifeline[2] = {-1, -1};
+
+bool haveLifeline() {
+    if (g_lifeline[0] >= 0) return true;
+    if (::pipe(g_lifeline) != 0) return false;
+    ::fcntl(g_lifeline[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(g_lifeline[1], F_SETFD, FD_CLOEXEC);
+    return true;
+}
+
+// Runs in the forked child, in its own process group, in place of the real
+// child -- which it forks and which inherits that group.  Waits for either to
+// end: the child's exit ends the watchdog too, and our death takes the whole
+// group down.  Only async-signal-safe calls from here on.
+[[noreturn]] void watchOver(pid_t child) {
+    // Let go of everything but the lifeline.  The pipe to the child's stdout
+    // above all: we must not hold it, or the parent would never see EOF.
+    int null = ::open("/dev/null", O_RDWR);
+    if (null >= 0) { ::dup2(null, STDOUT_FILENO); ::close(null); }
+    const int fdMax = (int)::sysconf(_SC_OPEN_MAX);
+    for (int fd = 3; fd < fdMax && fd < 4096; ++fd)
+        if (fd != g_lifeline[0]) ::close(fd);
+
+    for (;;) {
+        pollfd pfd{g_lifeline[0], POLLIN, 0};
+        if (::poll(&pfd, 1, 250) > 0) {            // EOF: asciiplay is gone
+            ::kill(0, SIGTERM);                    // the group, us included
+            ::_exit(0);
+        }
+        int st = 0;
+        if (::waitpid(child, &st, WNOHANG) == child) ::_exit(0);
+    }
+}
+#endif
+
+// One byte from stdin, waiting up to ms for it; -1 when none arrives.
+int readByte(int ms) {
+    pollfd pfd{STDIN_FILENO, POLLIN, 0};
+    if (::poll(&pfd, 1, ms) <= 0) return -1;
+    unsigned char c;
+    return ::read(STDIN_FILENO, &c, 1) == 1 ? c : -1;
+}
 
 } // namespace
 
@@ -98,6 +176,19 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
         ::fcntl(p[1], F_SETFD, FD_CLOEXEC);
     }
 
+    // Everything the child needs is prepared here: after fork it must not
+    // allocate, since another thread may have held the allocator's lock.
+    std::vector<char*> cargv;
+    cargv.reserve(argv.size() + 1);
+    for (const auto& s : argv) cargv.push_back(const_cast<char*>(s.c_str()));
+    cargv.push_back(nullptr);
+    pointAtRuntimeDir();
+#if defined(__linux__)
+    const pid_t parent = ::getpid();
+#else
+    const bool watched = haveLifeline();
+#endif
+
     pid_t pid = ::fork();
     if (pid < 0) {
         if (pipeStdout) { ::close(p[0]); ::close(p[1]); }
@@ -117,17 +208,6 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
             ::close(null);
         }
 
-        // Over SSH, XDG_RUNTIME_DIR is often unset.  Without it ffplay cannot
-        // find the PipeWire/PulseAudio socket, falls back to raw ALSA, fails to
-        // open the device, and exits -- silently, from the user's point of view.
-        // Point it at the session's runtime directory when one exists.
-        if (!::getenv("XDG_RUNTIME_DIR")) {
-            char rt[64];
-            std::snprintf(rt, sizeof rt, "/run/user/%u", (unsigned)::getuid());
-            struct stat st{};
-            if (::stat(rt, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == ::getuid())
-                ::setenv("XDG_RUNTIME_DIR", rt, 1);
-        }
         // Detach stdin from the terminal.  The child gets its own process group
         // below, so any read of the controlling terminal raises SIGTTIN and
         // stops it -- and ffmpeg/ffplay both poll stdin for interactive keys.
@@ -137,16 +217,21 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
 
         ::setpgid(0, 0);        // own group: our Ctrl-C must not reach ffmpeg
 
-#if defined(__linux__)
         // If we are killed outright (SIGKILL, crash), take the child with us.
+#if defined(__linux__)
         ::prctl(PR_SET_PDEATHSIG, SIGTERM);
-        if (::getppid() == 1) ::_exit(0);   // parent died during the race above
+        // We died during the race above.  Compared with our pid rather than
+        // 1: in a container we may be pid 1 ourselves.
+        if (::getppid() != parent) ::_exit(0);
+#else
+        if (watched) {
+            const pid_t child = ::fork();
+            if (child > 0) watchOver(child);
+            if (child < 0) ::_exit(127);
+            ::close(g_lifeline[0]);                    // the real child, below
+        }
 #endif
 
-        std::vector<char*> cargv;
-        cargv.reserve(argv.size() + 1);
-        for (const auto& s : argv) cargv.push_back(const_cast<char*>(s.c_str()));
-        cargv.push_back(nullptr);
         ::execvp(cargv[0], cargv.data());
         ::_exit(127);
     }
@@ -163,10 +248,23 @@ bool Proc::readExact(uint8_t* buf, std::size_t n) {
     while (got < n) {
         ssize_t r = ::read(fd, buf + got, n - got);
         if (r > 0)                   { got += (std::size_t)r; continue; }
-        if (r < 0 && errno == EINTR) { if (g_quit) return false; continue; }
+        if (r < 0 && errno == EINTR) {
+            // Ctrl-Z has to act now, not once a slow decode delivers a frame.
+            if (g_quit || g_suspend) return false;
+            continue;
+        }
         return false;                                   // EOF or hard error
     }
     return true;
+}
+
+bool Proc::waitData(int ms) {
+    int fd = (int)dec(pipe_);
+    if (fd < 0) return true;
+    pollfd pfd{fd, POLLIN, 0};
+    const int r = ::poll(&pfd, 1, ms);
+    if (r < 0) return errno != EINTR;          // a signal: let the caller look
+    return r > 0;                              // data, hang-up or error
 }
 
 std::string Proc::readAll() {
@@ -191,8 +289,21 @@ void Proc::stop() {
     if (pid > 0) {
         ::kill(-pid, SIGTERM);      // the whole group ffmpeg may have started
         ::kill(pid, SIGTERM);
+        // A second's grace, then SIGKILL: every seek stops the children, and
+        // one that ignores SIGTERM must not hang playback or our exit.
         int st = 0;
-        while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+        const double deadline = nowSeconds() + 1.0;
+        for (;;) {
+            const pid_t r = ::waitpid(pid, &st, WNOHANG);
+            if (r == pid || (r < 0 && errno != EINTR)) break;
+            if (nowSeconds() > deadline) {
+                ::kill(-pid, SIGKILL);
+                ::kill(pid, SIGKILL);
+                while (::waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+                break;
+            }
+            sleepMs(2);
+        }
         proc_ = nullptr;
     }
 }
@@ -209,12 +320,14 @@ void terminalEnter() {
         g_raw = true;
     }
     std::fputs("\x1b[?1049h\x1b[?25l", stdout);
+    std::fputs(kMouseOn, stdout);
     std::fflush(stdout);
     g_alt = true;
 }
 
 void terminalLeave() {
     if (g_alt) {
+        std::fputs(kMouseOff, stdout);
         std::fputs("\x1b[0m\x1b[?25h\x1b[?1049l", stdout);
         std::fflush(stdout);
         g_alt = false;
@@ -232,14 +345,7 @@ bool terminalSize(int& cols, int& rows) {
     return false;
 }
 
-int pollKey() {
-    pollfd pfd{STDIN_FILENO, POLLIN, 0};
-    if (::poll(&pfd, 1, 0) > 0) {
-        char c;
-        if (::read(STDIN_FILENO, &c, 1) == 1) return (unsigned char)c;
-    }
-    return -1;
-}
+Input pollInput() { return decodeInput(readByte); }
 
 void setChildStderrVisible(bool on) { g_childStderr = on; }
 
@@ -247,13 +353,29 @@ void installQuitHandler() {
     struct sigaction sa {};
     sa.sa_handler = onSignal;
     sigemptyset(&sa.sa_mask);
+    // Every way the terminal can ask us to stop has to run terminalLeave(), or
+    // the shell is left in the alternate screen with mouse reporting on.
     ::sigaction(SIGINT, &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
+    ::sigaction(SIGHUP, &sa, nullptr);
+    ::sigaction(SIGQUIT, &sa, nullptr);
     ::signal(SIGPIPE, SIG_IGN);   // ffmpeg dying must not kill us
+    catchSuspend();
 }
 
 bool quitRequested() { return g_quit != 0; }
 void requestQuit()   { g_quit = 1; }
+
+bool suspendRequested() { return g_suspend != 0; }
+
+void suspend() {
+    g_suspend = 0;
+    terminalLeave();
+    ::signal(SIGTSTP, SIG_DFL);
+    ::raise(SIGTSTP);             // stopped here until the shell sends SIGCONT
+    catchSuspend();
+    terminalEnter();
+}
 
 void writeOut(const char* p, std::size_t n) {
     std::size_t off = 0;

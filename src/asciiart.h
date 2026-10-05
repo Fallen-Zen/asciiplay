@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,18 @@ struct Options {
 
 [[noreturn]] void die(const std::string& msg);
 
+// The largest grid side, in cells.  Wider and taller than any real terminal,
+// and small enough that the buffers it implies -- (cols * 8) x (rows * 16)
+// pixels as RGB bytes, plus float luma and per-cell blocks -- stay around
+// 1.4 GB at 1000 x 1000 instead of overflowing or exhausting memory.
+constexpr int kMaxGrid = 1000;
+
+// Rounds a cols x rows grid to whole cells, at least 1 each way, shrinking it
+// with its shape kept until neither side exceeds kMaxGrid.  Takes doubles so
+// a size derived from an extreme aspect ratio is capped before it becomes an
+// int.
+void capGrid(double cols, double rows, int& outCols, int& outRows);
+
 std::vector<std::string> splitAny(const std::string& s, const char* seps);
 
 // ------------------------------------------------------------ media probe --
@@ -56,9 +69,13 @@ struct MediaInfo {
 
 MediaInfo probeMedia(const std::string& path);
 
-// argv for the ffmpeg/ffplay children.
+// argv for the ffmpeg/ffplay children.  seek normally goes before -i, which
+// jumps straight there; seekByDecoding puts it after, which decodes from the
+// start and discards up to it -- slow, but it works on inputs that cannot be
+// seeked, such as raw H.264 streams.
 std::vector<std::string> decoderArgs(const std::string& path, int pw, int ph,
-                                     bool isVideo, double fps, double seek);
+                                     bool isVideo, double fps, double seek,
+                                     bool seekByDecoding = false);
 std::vector<std::string> audioArgs(const std::string& path, double seek);
 
 // ---------------------------------------------------------------- glyphset --
@@ -109,14 +126,22 @@ struct Renderer {
     bool      cellBg = false;
     int       tol = 0;
     int cols = 0, rows = 0;
+    int skipRow = -1;                 // left alone: the seek bar is over it
     std::vector<Cell> prev;
     std::string buf;
 
     void reset(int cols, int rows);
-    void draw(const std::vector<Cell>& cur, const GlyphSet& gs);
+    void invalidateRow(int y);        // repaint it in full on the next draw
+    void draw(const std::vector<Cell>& cur, const GlyphSet& gs);   // compose + write
+
+    // Builds the escapes for cur into buf without writing them; false when
+    // nothing changed.
+    bool compose(const std::vector<Cell>& cur, const GlyphSet& gs);
 };
 
 // ------------------------------------------------------------------ engine --
+
+class WorkerPool;
 
 // Turns one decoded RGB frame into a grid of styled cells.
 struct Engine {
@@ -128,9 +153,11 @@ struct Engine {
     std::vector<float>   blocks;
     std::vector<int32_t> idx;
     std::vector<Cell>    cells;
-    int threads = 1;
+    int threads = 1;                 // matcher threads, the caller included
+    std::unique_ptr<WorkerPool> pool;
 
     Engine(const Options& o, const GlyphSet& g);
+    ~Engine();
 
     void        resize(int cols, int rows);
     std::size_t frameBytes() const { return (std::size_t)pw * ph * 3; }

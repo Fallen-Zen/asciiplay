@@ -21,12 +21,15 @@
 // and there is nothing to link against.
 
 #include "asciiart.h"
+#include "controls.h"
+#include "workers.h"
 #include "platform.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -43,8 +46,8 @@ void usage() {
 "  asciiplay FILE [options]\n"
 "\n"
 "Geometry\n"
-"  -c, --cols N       output width in characters (default: fit terminal)\n"
-"  -r, --rows N       output height in characters\n"
+"  -c, --cols N       output width in characters, 1..1000 (default: fit terminal)\n"
+"  -r, --rows N       output height in characters, 1..1000\n"
 "      --cell WxH     match resolution per cell (default 8x16; 4x8 is ~4x faster)\n"
 "\n"
 "Look\n"
@@ -66,7 +69,7 @@ void usage() {
 "      --no-audio     do not spawn ffplay\n"
 "      --verbose      show ffmpeg/ffplay errors (use with --no-audio or a still)\n"
 "      --loop         repeat until quit\n"
-"  -j, --threads N    matcher threads (default: all cores)\n"
+"  -j, --threads N    matcher threads, 1..256 (default: all cores)\n"
 "\n"
 "Output\n"
 "  -o, --out FILE     write to a file instead of playing (video: first frame)\n"
@@ -77,7 +80,15 @@ void usage() {
 "  -h, --help         this message\n"
 "  -V, --version      print the version and exit\n"
 "\n"
-"Keys during playback:  q / Esc quit    space pause\n"
+"Keys during playback\n"
+"  space              pause / resume\n"
+"  Left / Right       back / forward 5 s (also wheel down / up)\n"
+"  Up / Down          forward / back 1 min (also PgUp / PgDn)\n"
+"  0 .. 9             jump to 0% .. 90%\n"
+"  Home / End         start / end\n"
+"  q / Esc            quit\n"
+"  Any of these shows a progress bar on the bottom row; click or drag it to\n"
+"  seek.  Hold Shift (Option in Terminal.app) to select text with the mouse.\n"
 "\n"
 "Requires ffmpeg, ffprobe and (for sound) ffplay on PATH.\n");
 }
@@ -92,24 +103,22 @@ void pickGrid(const Options& opt, const MediaInfo& mi, const GlyphSet& gs,
     const double srcAR  = (double)mi.h / (double)mi.w;    // height / width
     const double cellAR = (double)gs.ch / (double)gs.cw;
 
-    if (opt.cols > 0 && opt.rows > 0) { cols = opt.cols; rows = opt.rows; return; }
-    if (opt.cols > 0) {
-        cols = opt.cols;
-        rows = std::max(1, (int)std::lround(cols * srcAR / cellAR));
-        return;
+    // Worked in doubles and capped last: an extreme aspect ratio must not
+    // overflow an int before the cap gets to it.
+    double c, r;
+    if (opt.cols > 0 && opt.rows > 0) { c = opt.cols; r = opt.rows; }
+    else if (opt.cols > 0)            { c = opt.cols; r = c * srcAR / cellAR; }
+    else if (opt.rows > 0)            { r = opt.rows; c = r * cellAR / srcAR; }
+    else {
+        c = tc;
+        r = c * srcAR / cellAR;
+        // Video has to fit on screen; a still printed to stdout may scroll.
+        if (isVideo && r > tr) {
+            r = tr;
+            c = r * cellAR / srcAR;
+        }
     }
-    if (opt.rows > 0) {
-        rows = opt.rows;
-        cols = std::max(1, (int)std::lround(rows * cellAR / srcAR));
-        return;
-    }
-    cols = tc;
-    rows = std::max(1, (int)std::lround(cols * srcAR / cellAR));
-    // Video has to fit on screen; a still printed to stdout may scroll.
-    if (isVideo && rows > tr) {
-        rows = tr;
-        cols = std::max(1, (int)std::lround(rows * cellAR / srcAR));
-    }
+    capGrid(c, r, cols, rows);
 }
 
 Options parseArgs(int argc, char** argv) {
@@ -128,8 +137,14 @@ Options parseArgs(int argc, char** argv) {
             std::printf("asciiplay %s\n", ASCIIPLAY_VERSION);
             std::exit(0);
         }
-        else if (a == "-c" || a == "--cols")    opt.cols = std::atoi(need(i, "--cols").c_str());
-        else if (a == "-r" || a == "--rows")    opt.rows = std::atoi(need(i, "--rows").c_str());
+        else if (a == "-c" || a == "--cols") {
+            opt.cols = std::atoi(need(i, "--cols").c_str());
+            if (opt.cols < 1 || opt.cols > kMaxGrid) die("--cols wants 1.." + std::to_string(kMaxGrid));
+        }
+        else if (a == "-r" || a == "--rows") {
+            opt.rows = std::atoi(need(i, "--rows").c_str());
+            if (opt.rows < 1 || opt.rows > kMaxGrid) die("--rows wants 1.." + std::to_string(kMaxGrid));
+        }
         else if (a == "--cell") {
             auto p = splitAny(need(i, "--cell"), "xX");
             if (p.size() != 2) die("--cell wants WxH, e.g. 4x8");
@@ -168,7 +183,11 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--no-audio")  opt.audio = false;
         else if (a == "--verbose")   plat::setChildStderrVisible(true);
         else if (a == "--loop")      opt.loop = true;
-        else if (a == "-j" || a == "--threads") opt.threads = std::atoi(need(i, "--threads").c_str());
+        else if (a == "-j" || a == "--threads") {
+            opt.threads = std::atoi(need(i, "--threads").c_str());
+            if (opt.threads < 1 || opt.threads > kMaxThreads)
+                die("--threads wants 1.." + std::to_string(kMaxThreads));
+        }
         else if (a == "-o" || a == "--out")     opt.out = need(i, "--out");
         else if (a == "--image")     opt.forceImage = true;
         else if (a == "--video")     opt.forceVideo = true;
@@ -209,8 +228,12 @@ int renderStill(const Options& opt, const MediaInfo& mi, const GlyphSet& gs,
     return 0;
 }
 
+// Seconds the bar stays up after a key or click.
+constexpr double kBarLinger = 2.0;
+
 int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     const double fps = opt.fps > 0 ? opt.fps : mi.fps;
+    const double dur = mi.duration;
 
     plat::installQuitHandler();
     plat::terminalEnter();
@@ -221,86 +244,224 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     ren.cellBg = opt.cellBg;
     ren.tol    = opt.colorTol;
 
+    SeekBar bar;
+    bar.mode = opt.color;
+    bar.dur  = dur;
+
     double seek = 0.0;                 // where in the file this pass started
     long   shown = 0, dropped = 0;
     bool   paused = false;
+    bool   regrid = true;              // false when a pass restarts only to seek
+    bool   painted = false;            // eng.cells is what is on screen
+    bool   dragging = false;
+    double dragTo = 0, barUntil = -1;
+    double reached = 0;                // furthest media time shown so far
+    bool   seekByDecoding = false;     // this pass retries a seek that jumped nowhere
 
-    for (;;) {                         // one pass; restarts on resize or --loop
-        int c, r;
-        pickGrid(opt, mi, gs, true, c, r);
-        eng.resize(c, r);
-        ren.reset(c, r);
-        plat::writeOut("\x1b[2J", 4);
-
+    for (;;) {                         // one pass; restarts on resize, seek or --loop
         int lastTc = 0, lastTr = 0;
         plat::terminalSize(lastTc, lastTr);
+        if (regrid) {
+            int c, r;
+            pickGrid(opt, mi, gs, true, c, r);
+            eng.resize(c, r);
+            ren.reset(c, r);
+            plat::writeOut("\x1b[2J", 4);
+            bar.place(lastTc, lastTr);
+            painted = false;
+            regrid = false;
+        }
 
         plat::Proc dec = plat::Proc::spawn(
-            decoderArgs(opt.path, eng.pw, eng.ph, true, fps, seek), true);
+            decoderArgs(opt.path, eng.pw, eng.ph, true, fps, seek, seekByDecoding), true);
+        const bool decodingSeek = seekByDecoding;
+        seekByDecoding = false;        // one retry, for this seek only
         if (!dec.valid()) { plat::terminalLeave(); die("could not start ffmpeg"); }
 
-        plat::Proc aud;
-        if (opt.audio) aud = plat::Proc::spawn(audioArgs(opt.path, seek), false);
+        plat::Proc aud;                // started with the first frame, below
 
-        const double t0 = plat::nowSeconds();
-        double pauseAccum = 0, pauseStart = 0, target = 0;
+        double t0 = plat::nowSeconds();
+        double pauseAccum = 0, pauseStart = t0, target = 0;
+        double showing = seek;         // media time of the frame on screen
+        double want = -1;              // pending seek, in media seconds
         long   frame = 0;
         bool   restart = false;
+        bool   stopping = false;       // Ctrl-Z: suspend once the children are gone
 
-        while (!plat::quitRequested() && !restart) {
+        // Brings the bar up, keeps it current, or takes it down and repaints
+        // the picture underneath.
+        auto updateBar = [&]() {
+            const bool up  = paused || dragging || plat::nowSeconds() < barUntil;
+            const int vrow = bar.row < ren.rows ? bar.row : -1;
+            if (up) {
+                ren.skipRow = vrow;
+                if (bar.render(dragging ? dragTo : showing, paused)) plat::writeOut(bar.buf);
+            } else if (bar.shown) {
+                plat::writeOut(bar.clear());
+                ren.skipRow = -1;
+                ren.invalidateRow(vrow);
+                if (painted) ren.draw(eng.cells, gs);
+            }
+        };
+
+        // Seeks only set `want`; the pass restarts once the input queue is
+        // drained, so a burst of key repeats costs one restart, not one each.
+        auto handle = [&](const plat::Input& in) {
+            using I = plat::Input;
+            const double from = want >= 0 ? want : showing;
+            const double to = seekFor(in, from, dur, reached);
+            if (to >= 0) {
+                want = to;
+                barUntil = plat::nowSeconds() + kBarLinger;
+                return;
+            }
+            switch (in.kind) {
+            case I::Esc:   plat::requestQuit(); return;
+            case I::Char:
+                if (in.ch == 'q' || in.ch == 'Q') { plat::requestQuit(); return; }
+                if (in.ch != ' ') return;      // not ours: leave the bar alone
+                paused = !paused;
+                if (paused) {
+                    pauseStart = plat::nowSeconds();
+                    aud.stop();
+                } else {
+                    pauseAccum += plat::nowSeconds() - pauseStart;
+                    if (opt.audio && want < 0 && frame > 0)
+                        aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
+                }
+                break;
+            // Seek keys that could not move, being at an end already, still
+            // show where we are.
+            case I::Left: case I::Right: case I::Up: case I::Down:
+            case I::PageUp: case I::PageDown: case I::Home: case I::End:
+            case I::WheelUp: case I::WheelDown:
+                break;
+            case I::MousePress:
+                if (bar.hit(in.y)) { dragging = true; dragTo = bar.timeAt(in.x); }
+                break;
+            case I::MouseDrag:
+                if (dragging) dragTo = bar.timeAt(in.x);
+                break;
+            case I::MouseRelease:
+                if (dragging) { dragging = false; want = clampSeek(dragTo, dur, reached); }
+                break;
+            default: return;
+            }
+            barUntil = plat::nowSeconds() + kBarLinger;
+        };
+
+        // Resizes, Ctrl-Z, keys and the bar.  Runs while pacing a frame and
+        // while waiting on the decoder; true when this pass has to end.
+        auto service = [&]() -> bool {
+            // Checked here rather than once a frame so a resize while paused
+            // is caught too -- the bar needs the new bottom row.
             int tc = 0, tr = 0;
             plat::terminalSize(tc, tr);
-            if (opt.cols <= 0 && opt.rows <= 0 && (tc != lastTc || tr != lastTr)) {
-                restart = true;
-                break;
+            if (tc != lastTc || tr != lastTr) {
+                lastTc = tc; lastTr = tr;
+                bar.place(tc, tr);
+                if (opt.cols <= 0 && opt.rows <= 0) { restart = regrid = true; return true; }
+                // Fixed size: same grid, but the old bar may be anywhere.
+                plat::writeOut("\x1b[2J", 4);
+                ren.reset(ren.cols, ren.rows);
+                if (painted) ren.draw(eng.cells, gs);
             }
 
-            if (!dec.readExact(eng.rgb.data(), eng.frameBytes())) break;   // EOF
+            if (plat::suspendRequested()) {
+                stopping = restart = regrid = true;
+                return true;
+            }
+
+            for (plat::Input in; (in = plat::pollInput()).kind != plat::Input::None; )
+                handle(in);
+            if (plat::quitRequested()) return true;
+            if (want >= 0) { restart = true; return true; }
+            updateBar();
+            return false;
+        };
+
+        while (!plat::quitRequested() && !restart) {
+            // A seek by decoding can take seconds to deliver its first frame;
+            // the keys, the bar and resizes stay live while it does.
+            bool ended = false;
+            while (!dec.waitData(20))
+                if ((ended = service())) break;
+            if (ended) break;
+
+            if (!dec.readExact(eng.rgb.data(), eng.frameBytes())) {
+                if (plat::suspendRequested())        // Ctrl-Z cut the read short
+                    stopping = restart = regrid = true;
+                break;                               // otherwise EOF
+            }
 
             target = (double)frame / fps;
             ++frame;
 
-            for (;;) {                                   // pacing and input
-                int k = plat::pollKey();
-                if (k == 'q' || k == 'Q' || k == 27) { plat::requestQuit(); break; }
-                if (k == ' ') {
-                    paused = !paused;
-                    if (paused) {
-                        pauseStart = plat::nowSeconds();
-                        aud.stop();
-                    } else {
-                        pauseAccum += plat::nowSeconds() - pauseStart;
-                        if (opt.audio)
-                            aud = plat::Proc::spawn(audioArgs(opt.path, seek + target), false);
-                    }
+            if (frame == 1) {
+                // The pass's clock starts with its first frame, not its spawn:
+                // time spent waiting on the decoder would otherwise count as
+                // lateness and drop that much video.
+                t0 = plat::nowSeconds();
+                pauseStart = t0;
+                pauseAccum = 0;
+                // Sound starts on the same instant as the picture, however
+                // long the decoder took to get here.
+                if (opt.audio && !paused)
+                    aud = plat::Proc::spawn(audioArgs(opt.path, seek), false);
+                if (paused) {                            // seeked while paused:
+                    eng.process();                       // show where it landed
+                    ren.draw(eng.cells, gs);
+                    painted = true;
                 }
-                if (plat::quitRequested()) break;
+            }
+
+            for (;;) {                                   // pacing and input
+                if (service()) break;
                 if (paused) { plat::sleepMs(20); continue; }
 
                 double elapsed = plat::nowSeconds() - t0 - pauseAccum;
                 if (elapsed >= target) break;
                 plat::sleepMs(std::min(5, (int)((target - elapsed) * 1000.0)));
             }
-            if (plat::quitRequested()) break;
+            if (plat::quitRequested() || restart) break;
 
             double elapsed = plat::nowSeconds() - t0 - pauseAccum;
             if (elapsed > target + 2.0 / fps) { ++dropped; continue; }  // behind
 
             eng.process();
             ren.draw(eng.cells, gs);
+            painted = true;
+            showing = seek + target;
+            reached = std::max(reached, showing);
             ++shown;
+            updateBar();
         }
 
-        const double played = plat::nowSeconds() - t0 - pauseAccum;
         dec.stop();
         aud.stop();
 
+        if (stopping) {                     // returns on `fg`; repaints below
+            plat::suspend();
+            dragging = false;               // the release went to the shell
+        }
         if (plat::quitRequested()) break;
-        if (restart) {
-            seek += played;
-            if (mi.duration > 0 && seek >= mi.duration) break;
+        if (want >= 0) { seek = want; continue; }
+        // Nothing at all from a seek: raw streams make ffmpeg's input seek
+        // fail outright.  Retry this one seek by decoding, which gets there on
+        // anything.  Only this one: the next seek jumps again, so a seek that
+        // simply landed past the end of a mis-probed file costs nothing later.
+        if (frame == 0 && seek > 0.01 && !restart && !decodingSeek) {
+            seekByDecoding = true;
             continue;
         }
+        if (restart) {                 // resized or resumed: carry on from the frame shown
+            seek = showing;
+            if (dur > 0 && seek >= dur) break;
+            continue;
+        }
+        // Not a single frame from the start of the file: there is nothing to
+        // loop, and retrying at once would spin on a decoder that keeps failing.
+        if (frame == 0 && seek <= 0.01) break;
         if (opt.loop) { seek = 0; continue; }
         break;
     }
@@ -313,9 +474,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     return 0;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Options opt = parseArgs(argc, argv);
 
     if (FILE* f = std::fopen(opt.path.c_str(), "rb")) std::fclose(f);
@@ -331,4 +490,18 @@ int main(int argc, char** argv) {
     if (!isVideo || !opt.out.empty())
         return renderStill(opt, mi, gs, isVideo);
     return playVideo(opt, mi, gs);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // An exception escaping playback (bad_alloc on a huge grid, a thread that
+    // will not start) would otherwise leave the shell in the alternate screen
+    // with mouse reporting on.  die() restores the terminal; by the time we
+    // get here, unwinding has already stopped ffmpeg and ffplay.
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        die(e.what());
+    }
 }

@@ -118,6 +118,12 @@ cmake --build build --config Release -j
 
 The binary lands at `build/asciiplay` (`build/Release/asciiplay.exe` on MSVC).
 
+Unit tests build alongside it (`-DASCIIPLAY_TESTS=OFF` skips them):
+
+```sh
+ctest --test-dir build -C Release --output-on-failure
+```
+
 For Visual Studio or Xcode project files:
 
 ```sh
@@ -144,8 +150,8 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 
 | Option | |
 |---|---|
-| `-c, --cols N` | width in characters (default: fit terminal) |
-| `-r, --rows N` | height in characters |
+| `-c, --cols N` | width in characters, 1–1000 (default: fit terminal) |
+| `-r, --rows N` | height in characters, 1–1000 |
 | `--cell WxH` | match resolution per cell, default `8x16`; `4x8` is ~4× faster |
 | `--ascii` | shortcut for classic ASCII art: `--glyphs ascii --color none --gamma 1.4` |
 | `--glyphs SET` | any mix of `ascii`, `blocks`, `braille` joined by `+` (default `ascii+blocks`) |
@@ -159,13 +165,40 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 | `--fps N` | override the frame rate |
 | `--no-audio` | do not spawn ffplay |
 | `--loop` | repeat until quit |
-| `-j, --threads N` | matcher threads (default: all cores) |
+| `-j, --threads N` | matcher threads, 1–256 (default: all cores) |
 | `-o, --out FILE` | write to a file instead of playing |
 | `--image` / `--video` | override input type detection |
 | `-V, --version` | print the version and exit |
 
-During playback: `q` or `Esc` quits, `space` pauses. Resizing the terminal
-re-fits the picture and resumes from the same position.
+### Playback controls
+
+| Key | Action |
+|---|---|
+| `space` | pause / resume |
+| `←` / `→` | back / forward 5 s (also wheel down / up) |
+| `↑` / `↓` | forward / back 1 min (also `PgUp` / `PgDn`) |
+| `0` … `9` | jump to 0% … 90% |
+| `Home` / `End` | start / end |
+| `q` / `Esc` | quit |
+
+Any of these brings up a progress bar on the bottom row; it stays while paused
+and fades two seconds after the last key otherwise, so playback keeps the whole
+screen:
+
+```text
+ ▶ 1:23 ━━━━━━━━━━━━━━━━━●────────────────────────────────────── 4:56
+```
+
+Click anywhere on the bar to jump there, or drag the knob to scrub. Seeking
+while paused shows the frame you land on. This uses the terminal's mouse
+reporting, which every mainstream terminal supports (including over SSH); while
+asciiplay runs, hold `Shift` — `Option` in Terminal.app — to select text with
+the mouse instead.
+
+Resizing the terminal re-fits the picture and resumes from the same position.
+On Linux and macOS, `Ctrl-Z` suspends cleanly and `fg` picks up where it
+stopped. `Ctrl-C`, `Ctrl-\` and closing the terminal all quit with the terminal
+put back as it was.
 
 ## Choosing a glyph set
 

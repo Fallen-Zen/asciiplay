@@ -27,13 +27,15 @@
 #endif
 #include <windows.h>
 
-#include <conio.h>
 #include <cstdio>
 #include <fcntl.h>   // _O_BINARY; <io.h> declares _setmode but not the modes
 #include <io.h>
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+#ifndef ENABLE_VIRTUAL_TERMINAL_INPUT
+#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
 #endif
 
 namespace plat {
@@ -44,7 +46,8 @@ bool g_childStderr = false;
 
 DWORD g_outModeSaved = 0, g_inModeSaved = 0;
 UINT  g_cpSaved = 0;
-bool  g_modeSaved = false, g_alt = false;
+bool  g_outSaved = false, g_inSaved = false, g_alt = false;
+bool  g_leftDown = false;       // a release only counts after our own press
 
 BOOL WINAPI ctrlHandler(DWORD type) {
     switch (type) {
@@ -58,6 +61,25 @@ BOOL WINAPI ctrlHandler(DWORD type) {
         default:
             return FALSE;
     }
+}
+
+// Every child joins one job that ends its processes when it is closed, and
+// the system closes it when we exit, however we exit -- what PR_SET_PDEATHSIG
+// gives on Linux.  Null if the job cannot be made; children then just run.
+HANDLE childJob() {
+    static const HANDLE job = [] {
+        HANDLE j = CreateJobObjectA(nullptr, nullptr);
+        if (!j) return j;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(j, JobObjectExtendedLimitInformation,
+                                     &li, sizeof li)) {
+            CloseHandle(j);
+            return HANDLE(nullptr);
+        }
+        return j;
+    }();
+    return job;
 }
 
 // Quote one argument the way CommandLineToArgvW parses it back.
@@ -151,9 +173,12 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
     std::string cmd;
     for (const auto& a : argv) appendArg(cmd, a);
 
+    // Suspended until it is in the job, so it cannot start a process of its
+    // own that escapes it.
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr,
-                             TRUE, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP |
+                             CREATE_SUSPENDED,
                              nullptr, nullptr, &si, &pi);
 
     if (wr)    CloseHandle(wr);        // child owns it now
@@ -162,6 +187,8 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
 
     if (!ok) { if (rd) CloseHandle(rd); return r; }
 
+    if (HANDLE job = childJob()) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     r.proc_ = pi.hProcess;
     r.pipe_ = rd;
@@ -179,6 +206,19 @@ bool Proc::readExact(uint8_t* buf, std::size_t n) {
         got += rd;
     }
     return true;
+}
+
+bool Proc::waitData(int ms) {
+    if (!pipe_) return true;
+    const double until = nowSeconds() + ms / 1000.0;
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe((HANDLE)pipe_, nullptr, 0, nullptr, &avail, nullptr))
+            return true;                       // closed: readExact reports EOF
+        if (avail > 0) return true;
+        if (nowSeconds() >= until) return false;
+        Sleep(1);
+    }
 }
 
 std::string Proc::readAll() {
@@ -210,10 +250,21 @@ void terminalEnter() {
     g_cpSaved = GetConsoleOutputCP();
     SetConsoleOutputCP(CP_UTF8);                    // block glyphs are UTF-8
 
-    if (GetConsoleMode(out, &g_outModeSaved) && GetConsoleMode(in, &g_inModeSaved)) {
+    // Output and input are set up independently: with stdin piped in, stdout
+    // is still a console and still needs VT processing for the escapes.
+    if (GetConsoleMode(out, &g_outModeSaved)) {
         SetConsoleMode(out, g_outModeSaved | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-        SetConsoleMode(in,  g_inModeSaved & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT));
-        g_modeSaved = true;
+        g_outSaved = true;
+    }
+    if (GetConsoleMode(in, &g_inModeSaved)) {
+        // Mouse events as input records.  Quick-edit has to go, or a click
+        // starts a text selection (and freezes our output) instead.  VT input
+        // goes too, so keys arrive with virtual-key codes, not escape bytes.
+        DWORD m = g_inModeSaved & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
+                                           ENABLE_QUICK_EDIT_MODE |
+                                           ENABLE_VIRTUAL_TERMINAL_INPUT);
+        SetConsoleMode(in, m | ENABLE_EXTENDED_FLAGS | ENABLE_MOUSE_INPUT);
+        g_inSaved = true;
     }
     _setmode(_fileno(stdout), _O_BINARY);           // do not translate \n
     std::fputs("\x1b[?1049h\x1b[?25l", stdout);
@@ -227,10 +278,16 @@ void terminalLeave() {
         std::fflush(stdout);
         g_alt = false;
     }
-    if (g_modeSaved) {
+    if (g_outSaved) {
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), g_outModeSaved);
-        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE),  g_inModeSaved);
-        g_modeSaved = false;
+        g_outSaved = false;
+    }
+    if (g_inSaved) {
+        // The quick-edit bit is only applied alongside ENABLE_EXTENDED_FLAGS,
+        // and the saved mode need not carry it.
+        SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE),
+                       g_inModeSaved | ENABLE_EXTENDED_FLAGS);
+        g_inSaved = false;
     }
     if (g_cpSaved) { SetConsoleOutputCP(g_cpSaved); g_cpSaved = 0; }
 }
@@ -246,11 +303,66 @@ bool terminalSize(int& cols, int& rows) {
     return false;
 }
 
-int pollKey() {
-    if (!_kbhit()) return -1;
-    int c = _getch();
-    if (c == 0 || c == 0xE0) { _getch(); return -1; }   // swallow function keys
-    return c;
+Input pollInput() {
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD pending = 0;
+    while (GetNumberOfConsoleInputEvents(h, &pending) && pending > 0) {
+        INPUT_RECORD r{};
+        DWORD got = 0;
+        if (!ReadConsoleInputW(h, &r, 1, &got) || got == 0) break;
+        Input in;
+
+        if (r.EventType == KEY_EVENT) {
+            const KEY_EVENT_RECORD& k = r.Event.KeyEvent;
+            if (!k.bKeyDown) continue;
+            switch (k.wVirtualKeyCode) {
+                case VK_LEFT:   in.kind = Input::Left;     return in;
+                case VK_RIGHT:  in.kind = Input::Right;    return in;
+                case VK_UP:     in.kind = Input::Up;       return in;
+                case VK_DOWN:   in.kind = Input::Down;     return in;
+                case VK_PRIOR:  in.kind = Input::PageUp;   return in;
+                case VK_NEXT:   in.kind = Input::PageDown; return in;
+                case VK_HOME:   in.kind = Input::Home;     return in;
+                case VK_END:    in.kind = Input::End;      return in;
+                case VK_ESCAPE: in.kind = Input::Esc;      return in;
+                default: break;
+            }
+            const WCHAR ch = k.uChar.UnicodeChar;
+            if (ch > 0 && ch < 128) { in.kind = Input::Char; in.ch = ch; return in; }
+            continue;
+        }
+
+        if (r.EventType == MOUSE_EVENT) {
+            const MOUSE_EVENT_RECORD& m = r.Event.MouseEvent;
+            CONSOLE_SCREEN_BUFFER_INFO ci{};
+            GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+            in.x = m.dwMousePosition.X - ci.srWindow.Left;   // buffer -> window
+            in.y = m.dwMousePosition.Y - ci.srWindow.Top;
+
+            if (m.dwEventFlags & MOUSE_WHEELED) {
+                in.kind = (short)HIWORD(m.dwButtonState) > 0 ? Input::WheelUp
+                                                             : Input::WheelDown;
+                return in;
+            }
+            const bool left = (m.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
+            if (m.dwEventFlags & MOUSE_MOVED) {
+                if (!left || !g_leftDown) continue;
+                in.kind = Input::MouseDrag;
+                return in;
+            }
+            if (left && !g_leftDown) {
+                g_leftDown = true;
+                in.kind = Input::MousePress;
+                return in;
+            }
+            if (!left && g_leftDown) {
+                g_leftDown = false;
+                in.kind = Input::MouseRelease;
+                return in;
+            }
+        }
+    }
+    return Input{};
 }
 
 void setChildStderrVisible(bool on) { g_childStderr = on; }
@@ -259,6 +371,9 @@ void installQuitHandler() { SetConsoleCtrlHandler(ctrlHandler, TRUE); }
 
 bool quitRequested() { return InterlockedCompareExchange(&g_quit, 0, 0) != 0; }
 void requestQuit()   { InterlockedExchange(&g_quit, 1); }
+
+bool suspendRequested() { return false; }
+void suspend() {}
 
 void writeOut(const char* p, std::size_t n) {
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);

@@ -10,18 +10,28 @@
 //
 #include "asciiart.h"
 #include "platform.h"
+#include "workers.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <thread>
 
 void die(const std::string& msg) {
     plat::terminalLeave();
     std::fprintf(stderr, "asciiplay: %s\n", msg.c_str());
     std::exit(1);
+}
+
+void capGrid(double cols, double rows, int& outCols, int& outRows) {
+    cols = std::max(cols, 1.0);
+    rows = std::max(rows, 1.0);
+    const double k = std::min({1.0, kMaxGrid / cols, kMaxGrid / rows});
+    outCols = std::min(kMaxGrid, std::max(1, (int)std::lround(cols * k)));
+    outRows = std::min(kMaxGrid, std::max(1, (int)std::lround(rows * k)));
 }
 
 std::vector<std::string> splitAny(const std::string& s, const char* seps) {
@@ -107,12 +117,15 @@ static std::string num(double v) {
 }
 
 std::vector<std::string> decoderArgs(const std::string& path, int pw, int ph,
-                                     bool isVideo, double fps, double seek) {
+                                     bool isVideo, double fps, double seek,
+                                     bool seekByDecoding) {
     // -nostdin matters: without it ffmpeg polls the terminal for interactive
     // keys, and in its own process group that raises SIGTTIN and stops it dead.
     std::vector<std::string> a = {"ffmpeg", "-nostdin", "-v", "error"};
-    if (seek > 0.01) { a.push_back("-ss"); a.push_back(num(seek)); }
+    const bool seeking = seek > 0.01;
+    if (seeking && !seekByDecoding) { a.push_back("-ss"); a.push_back(num(seek)); }
     a.push_back("-i"); a.push_back(path);
+    if (seeking && seekByDecoding)  { a.push_back("-ss"); a.push_back(num(seek)); }
 
     std::string vf = "scale=" + std::to_string(pw) + ":" + std::to_string(ph)
                    + ":flags=bilinear";
@@ -324,19 +337,16 @@ static void matchRange(const GlyphSet& gs, const float* B, int32_t* out,
 }
 
 static void matchAll(const GlyphSet& gs, const float* B, int32_t* out,
-                     int cells, bool mono, int threads) {
-    if (threads <= 1 || cells < 512) {
+                     int cells, bool mono, WorkerPool& pool) {
+    if (pool.size() <= 1 || cells < 512) {
         matchRange(gs, B, out, 0, cells, mono);
         return;
     }
-    std::vector<std::thread> pool;
-    int chunk = (cells + threads - 1) / threads;
-    for (int t = 0; t < threads; ++t) {
-        int a = t * chunk, b = std::min(cells, a + chunk);
-        if (a >= b) break;
-        pool.emplace_back(matchRange, std::cref(gs), B, out, a, b, mono);
-    }
-    for (auto& th : pool) th.join();
+    const int chunk = (cells + pool.size() - 1) / pool.size();
+    pool.run([&](int part) {
+        const int a = part * chunk, b = std::min(cells, a + chunk);
+        if (a < b) matchRange(gs, B, out, a, b, mono);
+    });
 }
 
 // ------------------------------------------------------------------ output --
@@ -397,15 +407,26 @@ void Renderer::reset(int c, int r) {
     cols = c; rows = r;
     prev.assign((std::size_t)c * r, Cell{});
     for (auto& p : prev) p.g = -2;          // force a full first paint
+    skipRow = -1;
+}
+
+void Renderer::invalidateRow(int y) {
+    if (y < 0 || y >= rows) return;
+    for (int x = 0; x < cols; ++x) prev[(std::size_t)y * cols + x].g = -2;
 }
 
 void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
+    if (compose(cur, gs)) plat::writeOut(buf);
+}
+
+bool Renderer::compose(const std::vector<Cell>& cur, const GlyphSet& gs) {
     buf.clear();
     int curX = -99, curY = -99;
     bool styled = false;
     Cell style{};
 
     for (int y = 0; y < rows; ++y) {
+        if (y == skipRow) continue;
         for (int x = 0; x < cols; ++x) {
             std::size_t i = (std::size_t)y * cols + x;
             if (cur[i].sameStyle(prev[i], mode)) continue;
@@ -434,9 +455,9 @@ void Renderer::draw(const std::vector<Cell>& cur, const GlyphSet& gs) {
             if (!cellBg) buf.insert(0, "\x1b[49m");
             buf += "\x1b[0m";
         }
-        plat::writeOut(buf);
     }
     prev = cur;
+    return !buf.empty();
 }
 
 // ------------------------------------------------------------------ engine --
@@ -445,7 +466,12 @@ Engine::Engine(const Options& o, const GlyphSet& g) : opt(o), gs(g) {
     threads = opt.threads > 0
             ? opt.threads
             : (int)std::max(1u, std::thread::hardware_concurrency());
+    threads = std::min(threads, kMaxThreads);
+    pool = std::make_unique<WorkerPool>(threads);
+    threads = pool->size();             // what the system actually gave us
 }
+
+Engine::~Engine() = default;
 
 void Engine::resize(int c, int r) {
     cols = c; rows = r;
@@ -527,7 +553,7 @@ void Engine::process() {
     // a blank glyph because the background was going to carry the colour.  With
     // no background that would erase every flat area, so match on absolute ink
     // instead: bright blocks fill, dark blocks empty.
-    matchAll(gs, blocks.data(), idx.data(), cols * rows, inkOnly, threads);
+    matchAll(gs, blocks.data(), idx.data(), cols * rows, inkOnly, *pool);
 
     // foreground = mean colour under the ink, background = mean colour behind it
     for (int r = 0; r < rows; ++r)
