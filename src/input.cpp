@@ -11,6 +11,7 @@
 #include "input.h"
 
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 
@@ -18,7 +19,14 @@ namespace plat {
 namespace {
 
 // How long to wait for the rest of an escape sequence once it has started.
-constexpr int kSeqWaitMs = 25;
+// Long enough that a sequence split in transit -- a laggy SSH link, a
+// multiplexer -- is still read as one, because a lone Esc quits.  100 ms is
+// vim's ttimeoutlen default for the same reason.
+constexpr int kSeqWaitMs = 100;
+
+// Longer parameter strings are no key or mouse report we know; such a
+// sequence is still read to its end, just not kept.
+constexpr std::size_t kMaxParams = 32;
 
 // b is the xterm button byte: low two bits the button (3 = released, in the
 // legacy encoding), +32 motion, +64 wheel.  x and y arrive 1-based.
@@ -69,22 +77,27 @@ Input decodeInput(const std::function<int(int ms)>& next) {
     if (c < 0) return in;
     if (c != 27) { in.kind = Input::Char; in.ch = c; return in; }
 
-    // A bare Esc and the start of an escape sequence begin with the same byte.
-    // The rest of a sequence is sent in the same write, so a short wait for a
-    // second byte tells them apart, even over SSH.
+    // A bare Esc and the start of an escape sequence begin with the same byte;
+    // a wait for a second byte tells them apart.
     const int c1 = next(kSeqWaitMs);
     if (c1 < 0) { in.kind = Input::Esc; return in; }
     if (c1 == 'O') return keyFor(next(kSeqWaitMs), 0);  // application cursor keys
     if (c1 != '[') return in;                           // Alt+key: ignore
 
+    // CSI params, then a final byte.  Whatever happens, read up to that final
+    // byte: bytes left behind would be decoded as keys, and a stray q, space
+    // or digit there would quit, pause or seek.
     std::string params;
+    bool overlong = false;
     int f;
-    for (;;) {                                          // CSI params, then final
+    for (;;) {
         f = next(kSeqWaitMs);
-        if (f < 0 || params.size() > 32) return in;
+        if (f < 0) return in;                           // cut short: nothing to act on
         if (f >= 0x40 && f <= 0x7e) break;
-        params += (char)f;
+        if (params.size() < kMaxParams) params += (char)f;
+        else                            overlong = true;
     }
+    if (overlong) return in;
 
     if (f == 'M' && params.empty()) {                   // legacy mouse: 3 raw bytes
         const int b = next(kSeqWaitMs), x = next(kSeqWaitMs), y = next(kSeqWaitMs);

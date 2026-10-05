@@ -19,22 +19,32 @@ using plat::Input;
 namespace {
 
 // Bytes as a terminal would deliver them.  An empty feed times out, as a
-// quiet terminal does.
+// quiet terminal does.  later() queues a byte that arrives only after a gap,
+// the way a sequence split in transit does.
 struct Feed {
-    std::deque<int> bytes;
-    std::vector<int> waits;          // the timeout asked for on each read
+    struct Byte { int c; int after; };   // after: ms of silence before it
+    std::deque<Byte> bytes;
+    std::vector<int> waits;              // the timeout asked for on each read
 
-    explicit Feed(const std::string& s) {
-        for (unsigned char c : s) bytes.push_back(c);
-    }
+    explicit Feed(const std::string& s) { add(s, 0); }
+
+    Feed& later(int ms, const std::string& s) { add(s, ms); return *this; }
+
     Input next() {
         return plat::decodeInput([this](int ms) {
             waits.push_back(ms);
             if (bytes.empty()) return -1;
-            int c = bytes.front();
+            Byte& b = bytes.front();
+            if (b.after > ms) { b.after -= ms; return -1; }   // still in transit
+            const int c = b.c;
             bytes.pop_front();
             return c;
         });
+    }
+
+private:
+    void add(const std::string& s, int gap) {
+        for (unsigned char c : s) { bytes.push_back({c, gap}); gap = 0; }
     }
 };
 
@@ -120,6 +130,35 @@ TEST(input_truncated_sequence_does_not_hang) {
 
 TEST(input_overlong_sequence_is_dropped) {
     CHECK_EQ(decode("\x1b[" + std::string(64, '1') + "~").kind, Input::None);
+}
+
+TEST(input_overlong_sequence_is_read_to_its_end) {
+    // Its tail must not come through as keys: digits would seek and the
+    // space (an intermediate byte) would pause.
+    Feed f("\x1b[" + std::string(40, '1') + ";5 ~x");
+    CHECK_EQ(f.next().kind, Input::None);
+    Input in = f.next();
+    CHECK_EQ(in.kind, Input::Char);
+    CHECK_EQ(in.ch, 'x');
+}
+
+TEST(input_split_arrow_is_still_an_arrow) {
+    Feed f("\x1b");
+    f.later(60, "[C");                    // the rest arrives 60 ms later
+    CHECK_EQ(f.next().kind, Input::Right);
+    CHECK_EQ(f.next().kind, Input::None);
+}
+
+TEST(input_split_wheel_report_is_still_a_wheel) {
+    Feed f("\x1b[<64;");
+    f.later(60, "10;5M");
+    CHECK_EQ(f.next().kind, Input::WheelUp);
+}
+
+TEST(input_esc_waits_long_enough_for_a_split_sequence) {
+    Feed f("\x1b");
+    f.next();
+    CHECK(f.waits[1] >= 100);
 }
 
 TEST(input_sgr_mouse_press_release_drag) {
