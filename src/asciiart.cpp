@@ -10,12 +10,14 @@
 //
 #include "asciiart.h"
 #include "platform.h"
+#include "workers.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <thread>
 
 void die(const std::string& msg) {
@@ -335,19 +337,16 @@ static void matchRange(const GlyphSet& gs, const float* B, int32_t* out,
 }
 
 static void matchAll(const GlyphSet& gs, const float* B, int32_t* out,
-                     int cells, bool mono, int threads) {
-    if (threads <= 1 || cells < 512) {
+                     int cells, bool mono, WorkerPool& pool) {
+    if (pool.size() <= 1 || cells < 512) {
         matchRange(gs, B, out, 0, cells, mono);
         return;
     }
-    std::vector<std::thread> pool;
-    int chunk = (cells + threads - 1) / threads;
-    for (int t = 0; t < threads; ++t) {
-        int a = t * chunk, b = std::min(cells, a + chunk);
-        if (a >= b) break;
-        pool.emplace_back(matchRange, std::cref(gs), B, out, a, b, mono);
-    }
-    for (auto& th : pool) th.join();
+    const int chunk = (cells + pool.size() - 1) / pool.size();
+    pool.run([&](int part) {
+        const int a = part * chunk, b = std::min(cells, a + chunk);
+        if (a < b) matchRange(gs, B, out, a, b, mono);
+    });
 }
 
 // ------------------------------------------------------------------ output --
@@ -467,7 +466,12 @@ Engine::Engine(const Options& o, const GlyphSet& g) : opt(o), gs(g) {
     threads = opt.threads > 0
             ? opt.threads
             : (int)std::max(1u, std::thread::hardware_concurrency());
+    threads = std::min(threads, kMaxThreads);
+    pool = std::make_unique<WorkerPool>(threads);
+    threads = pool->size();             // what the system actually gave us
 }
+
+Engine::~Engine() = default;
 
 void Engine::resize(int c, int r) {
     cols = c; rows = r;
@@ -549,7 +553,7 @@ void Engine::process() {
     // a blank glyph because the background was going to carry the colour.  With
     // no background that would erase every flat area, so match on absolute ink
     // instead: bright blocks fill, dark blocks empty.
-    matchAll(gs, blocks.data(), idx.data(), cols * rows, inkOnly, threads);
+    matchAll(gs, blocks.data(), idx.data(), cols * rows, inkOnly, *pool);
 
     // foreground = mean colour under the ink, background = mean colour behind it
     for (int r = 0; r < rows; ++r)

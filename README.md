@@ -165,7 +165,7 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 | `--fps N` | override the frame rate |
 | `--no-audio` | do not spawn ffplay |
 | `--loop` | repeat until quit |
-| `-j, --threads N` | matcher threads (default: all cores) |
+| `-j, --threads N` | matcher threads, 1–256 (default: all cores) |
 | `-o, --out FILE` | write to a file instead of playing |
 | `--image` / `--video` | override input type detection |
 | `-V, --version` | print the version and exit |
@@ -196,8 +196,9 @@ asciiplay runs, hold `Shift` — `Option` in Terminal.app — to select text wit
 the mouse instead.
 
 Resizing the terminal re-fits the picture and resumes from the same position.
-`Ctrl-Z` suspends cleanly and `fg` picks up where it stopped; `Ctrl-C`, `Ctrl-\`
-and closing the terminal all quit with the terminal put back as it was.
+On Linux and macOS, `Ctrl-Z` suspends cleanly and `fg` picks up where it
+stopped. `Ctrl-C`, `Ctrl-\` and closing the terminal all quit with the terminal
+put back as it was.
 
 ## Choosing a glyph set
 

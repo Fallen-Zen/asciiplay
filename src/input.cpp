@@ -103,8 +103,13 @@ Input decodeInput(const std::function<int(int ms)>& next) {
     if (overlong) return in;
 
     if (f == 'M' && params.empty()) {                   // legacy mouse: 3 raw bytes
-        const int b = next(kSeqWaitMs), x = next(kSeqWaitMs), y = next(kSeqWaitMs);
-        if (b < 0 || x < 0 || y < 0) return in;
+        // One byte at a time: a report cut short costs one wait, not three.
+        const int b = next(kSeqWaitMs);
+        if (b < 0) return in;
+        const int x = next(kSeqWaitMs);
+        if (x < 0) return in;
+        const int y = next(kSeqWaitMs);
+        if (y < 0) return in;
         return mouseEvent(b - 32, x - 32, y - 32, false);
     }
     if (!params.empty() && params[0] == '<' && (f == 'M' || f == 'm')) {

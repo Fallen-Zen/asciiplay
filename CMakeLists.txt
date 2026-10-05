@@ -29,6 +29,7 @@ add_library(asciiplay_core STATIC
     src/asciiart.cpp
     src/controls.cpp
     src/input.cpp
+    src/workers.cpp
     src/platform_posix.cpp
     src/platform_win.cpp        # each guards itself with #ifdef; only one compiles
 )
@@ -95,6 +96,7 @@ if(ASCIIPLAY_TESTS)
         tests/test_render.cpp
         tests/test_decoder.cpp
         tests/test_grid.cpp
+        tests/test_workers.cpp
     )
     target_link_libraries(asciiplay_tests PRIVATE asciiplay_core)
     asciiplay_tune(asciiplay_tests)

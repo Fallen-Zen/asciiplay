@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -140,6 +141,8 @@ struct Renderer {
 
 // ------------------------------------------------------------------ engine --
 
+class WorkerPool;
+
 // Turns one decoded RGB frame into a grid of styled cells.
 struct Engine {
     const Options&  opt;
@@ -150,9 +153,11 @@ struct Engine {
     std::vector<float>   blocks;
     std::vector<int32_t> idx;
     std::vector<Cell>    cells;
-    int threads = 1;
+    int threads = 1;                 // matcher threads, the caller included
+    std::unique_ptr<WorkerPool> pool;
 
     Engine(const Options& o, const GlyphSet& g);
+    ~Engine();
 
     void        resize(int cols, int rows);
     std::size_t frameBytes() const { return (std::size_t)pw * ph * 3; }

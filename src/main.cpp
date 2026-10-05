@@ -22,6 +22,7 @@
 
 #include "asciiart.h"
 #include "controls.h"
+#include "workers.h"
 #include "platform.h"
 
 #include <algorithm>
@@ -68,7 +69,7 @@ void usage() {
 "      --no-audio     do not spawn ffplay\n"
 "      --verbose      show ffmpeg/ffplay errors (use with --no-audio or a still)\n"
 "      --loop         repeat until quit\n"
-"  -j, --threads N    matcher threads (default: all cores)\n"
+"  -j, --threads N    matcher threads, 1..256 (default: all cores)\n"
 "\n"
 "Output\n"
 "  -o, --out FILE     write to a file instead of playing (video: first frame)\n"
@@ -182,7 +183,11 @@ Options parseArgs(int argc, char** argv) {
         else if (a == "--no-audio")  opt.audio = false;
         else if (a == "--verbose")   plat::setChildStderrVisible(true);
         else if (a == "--loop")      opt.loop = true;
-        else if (a == "-j" || a == "--threads") opt.threads = std::atoi(need(i, "--threads").c_str());
+        else if (a == "-j" || a == "--threads") {
+            opt.threads = std::atoi(need(i, "--threads").c_str());
+            if (opt.threads < 1 || opt.threads > kMaxThreads)
+                die("--threads wants 1.." + std::to_string(kMaxThreads));
+        }
         else if (a == "-o" || a == "--out")     opt.out = need(i, "--out");
         else if (a == "--image")     opt.forceImage = true;
         else if (a == "--video")     opt.forceVideo = true;

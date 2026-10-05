@@ -233,6 +233,12 @@ TEST(input_right_click_during_a_left_drag_is_ignored) {
     CHECK_EQ(f.next().kind, Input::MouseRelease);
 }
 
+TEST(input_truncated_legacy_mouse_waits_once) {
+    Feed f("\x1b[M ");                  // button byte, then nothing
+    CHECK_EQ(f.next().kind, Input::None);
+    CHECK_EQ(f.waits.size(), 5u);       // Esc, '[', 'M', button, one miss --
+}                                       // not a second miss for the last byte
+
 TEST(input_events_back_to_back) {
     Feed f("\x1b[C\x1b[<0;2;3M\x1b[<0;2;3m q");
     CHECK_EQ(f.next().kind, Input::Right);

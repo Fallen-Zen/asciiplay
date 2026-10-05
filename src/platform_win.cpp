@@ -63,6 +63,25 @@ BOOL WINAPI ctrlHandler(DWORD type) {
     }
 }
 
+// Every child joins one job that ends its processes when it is closed, and
+// the system closes it when we exit, however we exit -- what PR_SET_PDEATHSIG
+// gives on Linux.  Null if the job cannot be made; children then just run.
+HANDLE childJob() {
+    static const HANDLE job = [] {
+        HANDLE j = CreateJobObjectA(nullptr, nullptr);
+        if (!j) return j;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(j, JobObjectExtendedLimitInformation,
+                                     &li, sizeof li)) {
+            CloseHandle(j);
+            return HANDLE(nullptr);
+        }
+        return j;
+    }();
+    return job;
+}
+
 // Quote one argument the way CommandLineToArgvW parses it back.
 void appendArg(std::string& out, const std::string& arg) {
     if (!out.empty()) out += ' ';
@@ -154,9 +173,12 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
     std::string cmd;
     for (const auto& a : argv) appendArg(cmd, a);
 
+    // Suspended until it is in the job, so it cannot start a process of its
+    // own that escapes it.
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr,
-                             TRUE, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP |
+                             CREATE_SUSPENDED,
                              nullptr, nullptr, &si, &pi);
 
     if (wr)    CloseHandle(wr);        // child owns it now
@@ -165,6 +187,8 @@ Proc Proc::spawn(const std::vector<std::string>& argv, bool pipeStdout) {
 
     if (!ok) { if (rd) CloseHandle(rd); return r; }
 
+    if (HANDLE job = childJob()) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     r.proc_ = pi.hProcess;
     r.pipe_ = rd;
