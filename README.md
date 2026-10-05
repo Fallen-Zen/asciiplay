@@ -150,8 +150,8 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 
 | Option | |
 |---|---|
-| `-c, --cols N` | width in characters (default: fit terminal) |
-| `-r, --rows N` | height in characters |
+| `-c, --cols N` | width in characters, 1–1000 (default: fit terminal) |
+| `-r, --rows N` | height in characters, 1–1000 |
 | `--cell WxH` | match resolution per cell, default `8x16`; `4x8` is ~4× faster |
 | `--ascii` | shortcut for classic ASCII art: `--glyphs ascii --color none --gamma 1.4` |
 | `--glyphs SET` | any mix of `ascii`, `blocks`, `braille` joined by `+` (default `ascii+blocks`) |
@@ -175,7 +175,7 @@ asciiplay photo.jpg --bg             # two colours per cell instead
 | Key | Action |
 |---|---|
 | `space` | pause / resume |
-| `←` / `→` | back / forward 5 s (also the mouse wheel) |
+| `←` / `→` | back / forward 5 s (also wheel down / up) |
 | `↑` / `↓` | forward / back 1 min (also `PgUp` / `PgDn`) |
 | `0` … `9` | jump to 0% … 90% |
 | `Home` / `End` | start / end |

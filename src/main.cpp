@@ -45,8 +45,8 @@ void usage() {
 "  asciiplay FILE [options]\n"
 "\n"
 "Geometry\n"
-"  -c, --cols N       output width in characters (default: fit terminal)\n"
-"  -r, --rows N       output height in characters\n"
+"  -c, --cols N       output width in characters, 1..1000 (default: fit terminal)\n"
+"  -r, --rows N       output height in characters, 1..1000\n"
 "      --cell WxH     match resolution per cell (default 8x16; 4x8 is ~4x faster)\n"
 "\n"
 "Look\n"
@@ -81,7 +81,7 @@ void usage() {
 "\n"
 "Keys during playback\n"
 "  space              pause / resume\n"
-"  Left / Right       back / forward 5 s (also the mouse wheel)\n"
+"  Left / Right       back / forward 5 s (also wheel down / up)\n"
 "  Up / Down          forward / back 1 min (also PgUp / PgDn)\n"
 "  0 .. 9             jump to 0% .. 90%\n"
 "  Home / End         start / end\n"
@@ -251,7 +251,7 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
     bool   dragging = false;
     double dragTo = 0, barUntil = -1;
     double reached = 0;                // furthest media time shown so far
-    bool   seekByDecoding = false;     // the input cannot jump to a time
+    bool   seekByDecoding = false;     // this pass retries a seek that jumped nowhere
 
     for (;;) {                         // one pass; restarts on resize, seek or --loop
         int lastTc = 0, lastTr = 0;
@@ -269,12 +269,14 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
 
         plat::Proc dec = plat::Proc::spawn(
             decoderArgs(opt.path, eng.pw, eng.ph, true, fps, seek, seekByDecoding), true);
+        const bool decodingSeek = seekByDecoding;
+        seekByDecoding = false;        // one retry, for this seek only
         if (!dec.valid()) { plat::terminalLeave(); die("could not start ffmpeg"); }
 
         plat::Proc aud;
         if (opt.audio && !paused) aud = plat::Proc::spawn(audioArgs(opt.path, seek), false);
 
-        const double t0 = plat::nowSeconds();
+        double t0 = plat::nowSeconds();
         double pauseAccum = 0, pauseStart = t0, target = 0;
         double showing = seek;         // media time of the frame on screen
         double want = -1;              // pending seek, in media seconds
@@ -344,7 +346,44 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
             barUntil = plat::nowSeconds() + kBarLinger;
         };
 
+        // Resizes, Ctrl-Z, keys and the bar.  Runs while pacing a frame and
+        // while waiting on the decoder; true when this pass has to end.
+        auto service = [&]() -> bool {
+            // Checked here rather than once a frame so a resize while paused
+            // is caught too -- the bar needs the new bottom row.
+            int tc = 0, tr = 0;
+            plat::terminalSize(tc, tr);
+            if (tc != lastTc || tr != lastTr) {
+                lastTc = tc; lastTr = tr;
+                bar.place(tc, tr);
+                if (opt.cols <= 0 && opt.rows <= 0) { restart = regrid = true; return true; }
+                // Fixed size: same grid, but the old bar may be anywhere.
+                plat::writeOut("\x1b[2J", 4);
+                ren.reset(ren.cols, ren.rows);
+                if (painted) ren.draw(eng.cells, gs);
+            }
+
+            if (plat::suspendRequested()) {
+                stopping = restart = regrid = true;
+                return true;
+            }
+
+            for (plat::Input in; (in = plat::pollInput()).kind != plat::Input::None; )
+                handle(in);
+            if (plat::quitRequested()) return true;
+            if (want >= 0) { restart = true; return true; }
+            updateBar();
+            return false;
+        };
+
         while (!plat::quitRequested() && !restart) {
+            // A seek by decoding can take seconds to deliver its first frame;
+            // the keys, the bar and resizes stay live while it does.
+            bool ended = false;
+            while (!dec.waitData(20))
+                if ((ended = service())) break;
+            if (ended) break;
+
             if (!dec.readExact(eng.rgb.data(), eng.frameBytes())) {
                 if (plat::suspendRequested())        // Ctrl-Z cut the read short
                     stopping = restart = regrid = true;
@@ -354,37 +393,22 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
             target = (double)frame / fps;
             ++frame;
 
-            if (paused && frame == 1) {                  // seeked while paused:
-                eng.process();                           // show where it landed
-                ren.draw(eng.cells, gs);
-                painted = true;
+            if (frame == 1) {
+                // The pass's clock starts with its first frame, not its spawn:
+                // time spent waiting on the decoder would otherwise count as
+                // lateness and drop that much video.
+                t0 = plat::nowSeconds();
+                pauseStart = t0;
+                pauseAccum = 0;
+                if (paused) {                            // seeked while paused:
+                    eng.process();                       // show where it landed
+                    ren.draw(eng.cells, gs);
+                    painted = true;
+                }
             }
 
             for (;;) {                                   // pacing and input
-                // Checked here rather than once a frame so a resize while
-                // paused is caught too -- the bar needs the new bottom row.
-                int tc = 0, tr = 0;
-                plat::terminalSize(tc, tr);
-                if (tc != lastTc || tr != lastTr) {
-                    lastTc = tc; lastTr = tr;
-                    bar.place(tc, tr);
-                    if (opt.cols <= 0 && opt.rows <= 0) { restart = regrid = true; break; }
-                    // Fixed size: same grid, but the old bar may be anywhere.
-                    plat::writeOut("\x1b[2J", 4);
-                    ren.reset(ren.cols, ren.rows);
-                    if (painted) ren.draw(eng.cells, gs);
-                }
-
-                if (plat::suspendRequested()) {
-                    stopping = restart = regrid = true;
-                    break;
-                }
-
-                for (plat::Input in; (in = plat::pollInput()).kind != plat::Input::None; )
-                    handle(in);
-                if (plat::quitRequested()) break;
-                if (want >= 0) { restart = true; break; }
-                updateBar();
+                if (service()) break;
                 if (paused) { plat::sleepMs(20); continue; }
 
                 double elapsed = plat::nowSeconds() - t0 - pauseAccum;
@@ -415,9 +439,10 @@ int playVideo(const Options& opt, const MediaInfo& mi, const GlyphSet& gs) {
         if (plat::quitRequested()) break;
         if (want >= 0) { seek = want; continue; }
         // Nothing at all from a seek: raw streams make ffmpeg's input seek
-        // fail outright.  Seeking by decoding gets there on anything; the
-        // clamps keep the target inside the file, so this is never the end.
-        if (frame == 0 && seek > 0.01 && !restart && !seekByDecoding) {
+        // fail outright.  Retry this one seek by decoding, which gets there on
+        // anything.  Only this one: the next seek jumps again, so a seek that
+        // simply landed past the end of a mis-probed file costs nothing later.
+        if (frame == 0 && seek > 0.01 && !restart && !decodingSeek) {
             seekByDecoding = true;
             continue;
         }

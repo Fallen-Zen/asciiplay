@@ -195,6 +195,15 @@ bool Proc::readExact(uint8_t* buf, std::size_t n) {
     return true;
 }
 
+bool Proc::waitData(int ms) {
+    int fd = (int)dec(pipe_);
+    if (fd < 0) return true;
+    pollfd pfd{fd, POLLIN, 0};
+    const int r = ::poll(&pfd, 1, ms);
+    if (r < 0) return errno != EINTR;          // a signal: let the caller look
+    return r > 0;                              // data, hang-up or error
+}
+
 std::string Proc::readAll() {
     int fd = (int)dec(pipe_);
     std::string out;

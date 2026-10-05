@@ -43,6 +43,10 @@ public:
     bool        valid() const;
     bool        readExact(uint8_t* buf, std::size_t n);  // false at EOF/error,
                                                          // or on quit/suspend
+    // Waits up to ms for output; true once there is some to read, or the pipe
+    // has closed -- either way readExact will not sit idle.  Lets the caller
+    // stay responsive while a slow decoder gets going.
+    bool        waitData(int ms);
     std::string readAll();
     void        stop();
 

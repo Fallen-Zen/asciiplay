@@ -184,6 +184,19 @@ bool Proc::readExact(uint8_t* buf, std::size_t n) {
     return true;
 }
 
+bool Proc::waitData(int ms) {
+    if (!pipe_) return true;
+    const double until = nowSeconds() + ms / 1000.0;
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe((HANDLE)pipe_, nullptr, 0, nullptr, &avail, nullptr))
+            return true;                       // closed: readExact reports EOF
+        if (avail > 0) return true;
+        if (nowSeconds() >= until) return false;
+        Sleep(1);
+    }
+}
+
 std::string Proc::readAll() {
     std::string out;
     if (!pipe_) return out;
